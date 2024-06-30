@@ -88,7 +88,7 @@ class TeXFormatter:
         add_space = []
         # Add a space before '\' except when following ( [ { $ ^ \ or a space
         # or except when prefacing "right".
-        backslash_match = re.compile(r'[^\(\[\{\s\$\^\\\-\|]\\(?!right)')
+        backslash_match = re.compile(r'[^\(\[\{\s\$\^\\\-\|\_]\\(?!right)')
         if '\\' in line:
             for match in backslash_match.finditer(line):
                 add_space.append(offset + match.start(0) + 1)
@@ -165,6 +165,9 @@ class TeXFormatter:
             valid_comb = comb_len[(comb_len <= 80) & index_mask]
             if not valid_comb.size:
                 break
+            # Substitute for?:
+            # idx = np.where(comb_len == min(valid_comb))[0][0]
+            # assert index_mask[idx] is True
             indices = np.where(comb_len == min(valid_comb))[0]
             for idx in indices:
                 if index_mask[idx]:
@@ -181,20 +184,20 @@ class TeXFormatter:
             index_mask.pop(idx)
         return content
 
-    def allow_combine(self, first, second):
-        if re.search(r'(?:\w{3,}|\W)\.$', first.strip()):
+    def allow_combine(self, _first, _second):
+        if re.search(r'(?:\w{3,}|\W)\.$', _first.strip()):
             return False
-        first = first.strip().endswith
-        second = second.strip().startswith
+        first = _first.strip().endswith
+        second = _second.strip().startswith
         if second('=') or second('+') or second('-'):
             return False
-        if second('\\equiv') or second('\\cong'):
+        if second('\\equiv') or second('\\cong') or second('\\to'):
             return False
         if second('\\qquad') or second('\\quad'):
             return False
         if first('(') or first('[') or first('{'):
             return False
-        if second(')') or second('[') or second('}'):
+        if second(')') or second(']') or second('}'):
             return False
         if first('\\left(') or first('\\left[') or first('\\left\\{'):
             return False
@@ -287,19 +290,19 @@ class TeXFormatter:
         pattern = re.compile(r'\\quad|\\qquad')
         if pattern.search(skeleton[1:]):
             return self.line_split(line, pattern, keep=True)
-        pattern = re.compile(r'=|\\equiv|\\cong')
+        pattern = re.compile(r'=|\\equiv|\\cong|\\to')
         if pattern.search(skeleton[1:]):
             return self.line_split(line, pattern, keep='second')
         # If unmatched parenthesis, split right after/before.
         ret = self.check_unmatched_parenthesis(line)
         if ret is not None:
             return ret
-        # Split parenthesis into multiple lines if they are big enough.
-        ret = self.split_large_parenthesis(line)
-        if ret is not None:
-            return ret
         # Split sums and subtractions into multiple lines
         ret = self.split_sums(line)
+        if ret is not None:
+            return ret
+        # Split parenthesis into multiple lines if they are big enough.
+        ret = self.split_large_parenthesis(line)
         if ret is not None:
             return ret
         # Split the spaces of skeleton
@@ -315,10 +318,11 @@ class TeXFormatter:
     def split_sums(self, line):
         skeleton, _ = self.get_skeleton(line)
         new_lines = []
-        idx_s = prev_idx = 0
-        while '+' in skeleton[idx_s+1:] or '-' in skeleton[idx_s+1:]:
-            idx_s = min(skeleton.find('+', idx_s+1) % len(skeleton),
-                        skeleton.find('-', idx_s+1) % len(skeleton))
+        prev_idx = 0
+        # TODO: Handle cases like \cong - 3, etc.
+        # This should be done easier with new python 3.11 re functions.
+        for match in re.finditer(r'[^=\s]\s*(\+|\-)', skeleton):
+            idx_s = match.start(1)
             idx_l = self.get_index_line(idx_s, line)
             new_lines.append(self.indent + line[prev_idx:idx_l].lstrip())
             prev_idx = idx_l
