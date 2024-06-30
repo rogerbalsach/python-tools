@@ -88,7 +88,7 @@ class TeXFormatter:
         add_space = []
         # Add a space before '\' except when following ( [ { $ ^ \ or a space
         # or except when prefacing "right".
-        backslash_match = re.compile(r'[^\(\[\{\s\$\^\\\-\|]\\(?!right)')
+        backslash_match = re.compile(r'[^\(\[\{\s\$\^\\\-\|\_]\\(?!right)')
         if '\\' in line:
             for match in backslash_match.finditer(line):
                 add_space.append(offset + match.start(0) + 1)
@@ -165,6 +165,9 @@ class TeXFormatter:
             valid_comb = comb_len[(comb_len <= 80) & index_mask]
             if not valid_comb.size:
                 break
+            # Substitute for?:
+            # idx = np.where(comb_len == min(valid_comb))[0][0]
+            # assert index_mask[idx] is True
             indices = np.where(comb_len == min(valid_comb))[0]
             for idx in indices:
                 if index_mask[idx]:
@@ -181,20 +184,20 @@ class TeXFormatter:
             index_mask.pop(idx)
         return content
 
-    def allow_combine(self, first, second):
-        if re.search(r'(?:\w{3,}|\W)\.$', first.strip()):
+    def allow_combine(self, _first, _second):
+        if re.search(r'(?:\w{3,}|\W)\.$', _first.strip()):
             return False
-        first = first.strip().endswith
-        second = second.strip().startswith
+        first = _first.strip().endswith
+        second = _second.strip().startswith
         if second('=') or second('+') or second('-'):
             return False
-        if second('\\equiv') or second('\\cong'):
+        if second('\\equiv') or second('\\cong') or second('\\to'):
             return False
         if second('\\qquad') or second('\\quad'):
             return False
         if first('(') or first('[') or first('{'):
             return False
-        if second(')') or second('[') or second('}'):
+        if second(')') or second(']') or second('}'):
             return False
         if first('\\left(') or first('\\left[') or first('\\left\\{'):
             return False
@@ -287,19 +290,19 @@ class TeXFormatter:
         pattern = re.compile(r'\\quad|\\qquad')
         if pattern.search(skeleton[1:]):
             return self.line_split(line, pattern, keep=True)
-        pattern = re.compile(r'=|\\equiv|\\cong')
+        pattern = re.compile(r'=|\\equiv|\\cong|\\to')
         if pattern.search(skeleton[1:]):
             return self.line_split(line, pattern, keep='second')
         # If unmatched parenthesis, split right after/before.
         ret = self.check_unmatched_parenthesis(line)
         if ret is not None:
             return ret
-        # Split parenthesis into multiple lines if they are big enough.
-        ret = self.split_large_parenthesis(line)
-        if ret is not None:
-            return ret
         # Split sums and subtractions into multiple lines
         ret = self.split_sums(line)
+        if ret is not None:
+            return ret
+        # Split parenthesis into multiple lines if they are big enough.
+        ret = self.split_large_parenthesis(line)
         if ret is not None:
             return ret
         # Split the spaces of skeleton
@@ -315,10 +318,11 @@ class TeXFormatter:
     def split_sums(self, line):
         skeleton, _ = self.get_skeleton(line)
         new_lines = []
-        idx_s = prev_idx = 0
-        while '+' in skeleton[idx_s+1:] or '-' in skeleton[idx_s+1:]:
-            idx_s = min(skeleton.find('+', idx_s+1) % len(skeleton),
-                        skeleton.find('-', idx_s+1) % len(skeleton))
+        prev_idx = 0
+        # TODO: Handle cases like \cong - 3, etc.
+        # This should be done easier with new python 3.11 re functions.
+        for match in re.finditer(r'[^=\s]\s*(\+|\-)', skeleton):
+            idx_s = match.start(1)
             idx_l = self.get_index_line(idx_s, line)
             new_lines.append(self.indent + line[prev_idx:idx_l].lstrip())
             prev_idx = idx_l
@@ -460,94 +464,12 @@ class TeXFormatter:
         return NotImplemented
 
 s = r'''
-\section{SU(3) matrix properties}
-See \cite{Nishi} (22)
 \begin{equation*}
-    \Tr{T^aT^b}
-    = T^a_{ij}T^b_{ji}
-    = T_F \delta^{ab}
+    \boxed{
+        \lag_{\mathrm{eff}}
+        = - \frac{c}{2 m_e^2} F^{\mu \sigma} \partial_{\sigma} \partial^{\nu} F_{\mu \nu}
+    }
 \end{equation*}
-\begin{equation*}
-    \comm{T^a}{T^b}_{ik}
-    = T^a_{ij}T^b_{jk} - T^b_{ij}T^a_{jk}
-    = i f^{abc}T^c_{ik}
-\end{equation*}
-\begin{equation*}
-    T^a_{ij}T^a_{kl}
-    = T_F\left(
-    \delta_{il}\delta_{kj} - \frac{1}{N_c}\delta_{ij}\delta_{kl}
-    \right)
-    \end{equation*}
-\begin{equation*}
-    T^a_{ij}T^a_{kl}
-    = \frac{1}{N_c}\left(
-        C_F\delta_{il}\delta_{kj} - T^a_{il}T^a_{kj}
-    \right)
-\end{equation*}
-\begin{equation*}
-    \delta_{il}\delta_{kj}
-    = \frac{1}{T_F}T^a_{ij}T^a_{kl} + \frac{1}{N_c}\delta_{ij}\delta_{kl}
-\end{equation*}
-\begin{equation*}
-    (T_a)_{ij}T^a_{jk}
-    = \frac{1}{2T_F} T^a_{ij} T^a_{jk}
-    = \frac{1}{2} \left(N_c - \frac{1}{N_c}\right)\delta_{ik}
-    = C_F \delta_{ik}
-\end{equation*}
-\begin{equation*}
-    T^a_{ij}T^b_{jk}T^a_{kl}
-    = T_F \left(\delta_{il}\delta_{jk}
-    - \frac{1}{N_c}\delta_{ij}\delta_{kl}\right)T^b_{jk}
-    = -\frac{T_F}{N_c}\delta_{ij}\delta_{kl}T^b_{jk}
-    = \frac{-T_F}{N_c}T^b_{il}
-\end{equation*}
-
-\begin{equation*}
-    f^{acd}f^{bcd}
-    = 2T_FN_c \delta^{ab}
-\end{equation*}
-\begin{equation*}
-    d^{ade}d^{bdf}f^{cef} = \left(C_F-3\frac{T_F}{N_c}\right)f^{abc}
-\end{equation*}
-\begin{equation*}
-    d^{ade}f^{bfd}f^{cfe}T^c_{ij}
-    = - d^{ade} if^{bfd} \left(
-        T_{ii_1}^f T_{i_1j}^e
-        - T_{ii_1}^e T_{i_1j}^f
-    \right)
-\end{equation*}
-\begin{align*}
-    d^{ade}f^{bfd}f^{cfe} &
-    = -d^{ade} if^{bfd} if^{cfe} \\&
-    = -\frac{1}{T_F} d^{ade} if^{bfd} \left(
-        T_{i_1i_2}^c T_{i_2i_3}^f T_{i_3i_1}^e
-        - T_{i_1i_2}^f T_{i_2i_3}^c T_{i_3i_1}^e
-    \right) \\&
-    = -\frac{1}{T_F} d^{ade} \left(
-        2T_{i_1i_2}^d T_{i_2i_3}^b T_{i_3i_4}^e
-        - T_{i_1i_2}^b T_{i_2i_3}^d T_{i_3i_4}^e
-        - T_{i_1i_2}^e T_{i_2i_3}^d T_{i_3i_4}^b
-    \right) T_{i_4i_1}^c \\&
-    = -\frac{1}{T_F} \left(
-        2T^2_F \delta^{ab} \delta_{i_1i_4}
-        - \frac{4T_F}{N_c} T_{i_1i_3}^b T_{i_3i_4}^a
-        + \left(\frac{T_F}{N_c} - C_F\right) T_{i_1i_2}^b T_{i_2i_4}^a
-        + \left(\frac{T_F}{N_c} - C_F\right) T_{i_1i_3}^a T_{i_3i_4}^b
-    \right) T_{i_4i_1}^c \\&
-\end{align*}
-\begin{equation*}
-    d^{ade}f^{bfd}f^{cfe}
-    = \frac{N_c}{2} d^{abc}
-\end{equation*}
-\begin{equation*}
-    d^{ade}f^{bfd}f^{cfe}+d^{ade}f^{bfd}f^{cef} = 0
-\end{equation*}
-\begin{equation*}
-    f^{ade}f^{bcd}+f^{bde}f^{cad}+f^{cde}f^{abd} = 0
-\end{equation*}
-
-\bibliographystyle{unsrt}
-\bibliography{PhD_Bibliography.bib}
 '''
 r = TeXFormatter(s)
 print(r)
@@ -595,7 +517,7 @@ s = r'''
     = \frac{1}{2\pi b_0}\left[\log(1-2\lambda) + \frac{b_0\alpha_S(\mu_R^2)}{1-2\lambda}\left(\log(\frac{Q^2}{\mu_R^2}) - 2\gamma_E\right) + \alpha_S(\mu_R^2)\frac{b_1}{b_0}\frac{\log(1-2\lambda)}{1 - 2\lambda}\right] + \order{\alpha_S^2}
 \end{align*}
 '''
-assert TeXFormatter(s) == '\n\\begin{align*}\n    \\tilde{g}_S \\left(\\frac{Q}{\\bar{N}}, \\mu_R\\right) &\n    = \\frac{1}{2 \\pi b_0} \\left[\n        \\log(\n            1 - 2 \\lambda + b_0 \\alpha_S(\\mu_R^2) \\left(\n                \\log(\\frac{Q^2}{\\mu_R^2}) - 2 \\gamma_E\n            \\right)\n        )\n        + \\alpha_S(\\mu_R^2) \\frac{b_1}{b_0}\n        \\frac{\\log(1 - 2 \\lambda)}{1 - 2 \\lambda}\n    \\right] + \\order{\\alpha_S^2} \\\\&\n    = \\frac{1}{2 \\pi b_0} \\left[\n        \\log(1 - 2 \\lambda) + \\frac{b_0 \\alpha_S(\\mu_R^2)}{1 - 2 \\lambda} \\left(\n            \\log(\\frac{Q^2}{\\mu_R^2}) - 2 \\gamma_E\n        \\right)\n        + \\alpha_S(\\mu_R^2) \\frac{b_1}{b_0}\n        \\frac{\\log(1 - 2 \\lambda)}{1 - 2 \\lambda}\n    \\right] + \\order{\\alpha_S^2}\n\\end{align*}\n'
+assert TeXFormatter(s) == '\n\\begin{align*}\n    \\tilde{g}_S \\left(\\frac{Q}{\\bar{N}}, \\mu_R\\right) &\n    = \\frac{1}{2 \\pi b_0} \\left[\n        \\log(\n            1\n            - 2 \\lambda\n            + b_0 \\alpha_S(\\mu_R^2) \\left(\n                \\log(\\frac{Q^2}{\\mu_R^2}) - 2 \\gamma_E\n            \\right)\n        )\n        + \\alpha_S(\\mu_R^2) \\frac{b_1}{b_0}\n        \\frac{\\log(1 - 2 \\lambda)}{1 - 2 \\lambda}\n    \\right]\n    + \\order{\\alpha_S^2} \\\\&\n    = \\frac{1}{2 \\pi b_0} \\left[\n        \\log(1 - 2 \\lambda)\n        + \\frac{b_0 \\alpha_S(\\mu_R^2)}{1 - 2 \\lambda} \\left(\n            \\log(\\frac{Q^2}{\\mu_R^2}) - 2 \\gamma_E\n        \\right)\n        + \\alpha_S(\\mu_R^2) \\frac{b_1}{b_0}\n        \\frac{\\log(1 - 2 \\lambda)}{1 - 2 \\lambda}\n    \\right]\n    + \\order{\\alpha_S^2}\n\\end{align*}\n'
 
 s = r'''
 \begin{equation*}
@@ -603,7 +525,7 @@ s = r'''
     = \left(1 + \frac{\alpha_S(\mu_R^2)}{\pi}\frac{K^{(1)}}{1-2\lambda}\right)e^{\tilde{g}_S\left(\frac{Q}{\bar{N}}, \mu_R\right)\Gamma^{(1)}}\left(1 - \frac{\alpha_S(\mu_R^2)}{\pi}K^{(1)}\right) + \order{\alpha_S^2}
 \end{equation*}
 '''
-assert TeXFormatter(s) == '\n\\begin{equation*}\n    U \\left(\\frac{Q}{\\bar{N}}, \\mu_R\\right)\n    = \\left(\n        1 + \\frac{\\alpha_S(\\mu_R^2)}{\\pi} \\frac{K^{(1)}}{1 - 2 \\lambda}\n    \\right) e^{\n        \\tilde{g}_S \\left(\\frac{Q}{\\bar{N}}, \\mu_R\\right) \\Gamma^{(1)}\n    } \\left(\n        1 - \\frac{\\alpha_S(\\mu_R^2)}{\\pi} K^{(1)}\n    \\right) + \\order{\\alpha_S^2}\n\\end{equation*}\n'
+assert TeXFormatter(s) == '\n\\begin{equation*}\n    U \\left(\\frac{Q}{\\bar{N}}, \\mu_R\\right)\n    = \\left(\n        1 + \\frac{\\alpha_S(\\mu_R^2)}{\\pi} \\frac{K^{(1)}}{1 - 2 \\lambda}\n    \\right) e^{\n        \\tilde{g}_S \\left(\\frac{Q}{\\bar{N}}, \\mu_R\\right) \\Gamma^{(1)}\n    } \\left(1 - \\frac{\\alpha_S(\\mu_R^2)}{\\pi} K^{(1)}\\right)\n    + \\order{\\alpha_S^2}\n\\end{equation*}\n'
 
 s = r'''
 In particular, we are interested in evolving $S$ from the scale where renormalization takes place $\mu_0=\mu_R$ to the soft scale $\mu = Q\bar{N}^{-1}$. Where $\bar{N}=Ne^{\gamma_E}$ as defined in \cite{Kulesza17}. Then
@@ -619,7 +541,7 @@ with
     = \frac{1}{2\pi b_0}\left[\log(1 + b_0\alpha_S(\mu_0^2)\log(\frac{\mu^2}{\mu_0^2})) + \alpha_S(\mu_0^2)\frac{b_1}{b_0}\frac{\log(1+b_0\alpha_S(\mu_0^2)\log(\frac{\mu^2}{\mu^2_0}))}{1 + b_0\alpha_S(\mu_0^2)\log(\frac{\mu^2}{\mu_0^2})}\right] + \order{\alpha_S^2}
 \end{align*}
 '''
-assert TeXFormatter(s) == '\nwith\n\\begin{align*}\n    \\tilde{g}_S(\\mu, \\mu_0) &\n    = - \\frac{1}{2 \\pi b_0} \\log(\\frac{\\alpha_S(\\mu^2)}{\\alpha_S(\\mu_0^2)})\n    = \\frac{1}{2 \\pi b_0} \\log(\\frac{\\alpha_S(\\mu_0^2)}{\\alpha_S(\\mu^2)}) \\\\&\n    = \\frac{1}{2 \\pi b_0} \\log(\n        1\n        + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu_0^2})\n        + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0} \\log(\n            1 + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu^2_0})\n        )\n    ) + \\order{\\alpha_S^2} \\\\&\n    = \\frac{1}{2 \\pi b_0} \\left[\n        \\log(\n            1 + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu_0^2})\n        ) + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0} \\frac{\n            \\log(1 + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu^2_0}))\n        }{1 + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu_0^2})}\n    \\right] + \\order{\\alpha_S^2}\n\\end{align*}\n'
+assert TeXFormatter(s) == '\nwith\n\\begin{align*}\n    \\tilde{g}_S(\\mu, \\mu_0) &\n    = - \\frac{1}{2 \\pi b_0} \\log(\\frac{\\alpha_S(\\mu^2)}{\\alpha_S(\\mu_0^2)})\n    = \\frac{1}{2 \\pi b_0} \\log(\\frac{\\alpha_S(\\mu_0^2)}{\\alpha_S(\\mu^2)}) \\\\&\n    = \\frac{1}{2 \\pi b_0} \\log(\n        1\n        + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu_0^2})\n        + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0} \\log(\n            1 + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu^2_0})\n        )\n    )\n    + \\order{\\alpha_S^2} \\\\&\n    = \\frac{1}{2 \\pi b_0} \\left[\n        \\log(1 + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu_0^2}))\n        + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0} \\frac{\n            \\log(1 + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu^2_0}))\n        }{1 + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu_0^2})}\n    \\right]\n    + \\order{\\alpha_S^2}\n\\end{align*}\n'
 
 s = r'''
 which we can now solve iteratively by substituting the formula onto itself (and neglecting $\order{\alpha_S^2}$ terms). Note that $\mu \ll \mu_0$, so in general $\alpha_S(\mu_0^2)\log(\frac{\mu^2}{\mu^2_0})$ is not necessarily a small quantity and thus we cannot neglect those terms
@@ -629,21 +551,21 @@ which we can now solve iteratively by substituting the formula onto itself (and 
 \end{align*}
 Putting everything together in equation \eqref{eq:Kmatrix} we have
 '''
-assert TeXFormatter(s) == '\nwhich we can now solve iteratively by substituting\nthe formula onto itself (and neglecting $\\order{\\alpha_S^2}$ terms).\nNote that $\\mu \\ll \\mu_0$,\nso in general $\\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu^2_0})$\nis not necessarily a small quantity and thus we cannot neglect those terms\n\\begin{align*}\n    \\frac{\\alpha_S(\\mu_0^2)}{\\alpha_S(\\mu^2)} &\n    = 1\n    + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu_0^2})\n    + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0} \\log(\n        1 + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu^2_0}) + \\order{\\alpha_S}\n    ) + \\order{\\alpha_S^2} \\\\&\n    = 1\n    + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu_0^2})\n    + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0} \\log(\n        1 + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu^2_0})\n    ) + \\order{\\alpha_S^2}\n\\end{align*}\nPutting everything together in equation \\eqref{eq:Kmatrix} we have\n'
+assert TeXFormatter(s) == '\nwhich we can now solve iteratively by substituting\nthe formula onto itself (and neglecting $\\order{\\alpha_S^2}$ terms).\nNote that $\\mu \\ll \\mu_0$,\nso in general $\\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu^2_0})$\nis not necessarily a small quantity and thus we cannot neglect those terms\n\\begin{align*}\n    \\frac{\\alpha_S(\\mu_0^2)}{\\alpha_S(\\mu^2)} &\n    = 1\n    + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu_0^2})\n    + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0} \\log(\n        1 + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu^2_0}) + \\order{\\alpha_S}\n    )\n    + \\order{\\alpha_S^2} \\\\&\n    = 1\n    + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu_0^2})\n    + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0} \\log(\n        1 + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu^2_0})\n    )\n    + \\order{\\alpha_S^2}\n\\end{align*}\nPutting everything together in equation \\eqref{eq:Kmatrix} we have\n'
 
 s = r'''
 \begin{equation*}
     \frac{\alpha_S(\mu_0^2)}{\alpha_S(\mu^2)} = 1 + b_0\alpha_S(\mu_0^2)\log(\frac{\mu^2}{\mu_0^2}) +  \alpha_S(\mu_0^2)\frac{b_1}{b_0}\log(\frac{\frac{\alpha_S(\mu_0^2)}{\alpha_S(\mu^2)}+ \alpha_S(\mu_0^2)\frac{b_1}{b_0}}{1+\alpha_S(\mu_0^2) \frac{b_1}{b_0}}) + \order{\alpha_S^2}
 \end{equation*}
 '''
-assert TeXFormatter(s) == '\n\\begin{equation*}\n    \\frac{\\alpha_S(\\mu_0^2)}{\\alpha_S(\\mu^2)}\n    = 1\n    + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu_0^2})\n    + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0} \\log(\n        \\frac{\n            \\frac{\\alpha_S(\\mu_0^2)}{\\alpha_S(\\mu^2)}\n            + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0}\n        }{1 + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0}}\n    ) + \\order{\\alpha_S^2}\n\\end{equation*}\n'
+assert TeXFormatter(s) == '\n\\begin{equation*}\n    \\frac{\\alpha_S(\\mu_0^2)}{\\alpha_S(\\mu^2)}\n    = 1\n    + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu_0^2})\n    + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0} \\log(\n        \\frac{\n            \\frac{\\alpha_S(\\mu_0^2)}{\\alpha_S(\\mu^2)}\n            + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0}\n        }{1 + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0}}\n    )\n    + \\order{\\alpha_S^2}\n\\end{equation*}\n'
 
 s = r'''
 \begin{equation*}
     -b_0\alpha_S(\mu_0^2)\log(\frac{\mu^2}{\mu_0^2}) = \alpha_S(\mu_0^2)\frac{b_1}{b_0}\log(\frac{\frac{\alpha_S(\mu_0^2)}{\alpha_S(\mu^2)}+ \alpha_S(\mu_0^2)\frac{b_1}{b_0}}{1+\alpha_S(\mu_0^2) \frac{b_1}{b_0}})+1-\frac{\alpha_S(\mu_0^2)}{\alpha_S(\mu^2)} + \order{\alpha_S^2}
 \end{equation*}
 '''
-assert TeXFormatter(s) == '\n\\begin{equation*}\n    - b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu_0^2})\n    = \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0} \\log(\n        \\frac{\n            \\frac{\\alpha_S(\\mu_0^2)}{\\alpha_S(\\mu^2)}\n            + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0}\n        }{1 + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0}}\n    ) + 1 - \\frac{\\alpha_S(\\mu_0^2)}{\\alpha_S(\\mu^2)} + \\order{\\alpha_S^2}\n\\end{equation*}\n'
+assert TeXFormatter(s) == '\n\\begin{equation*}\n    - b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu_0^2})\n    = \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0} \\log(\n        \\frac{\n            \\frac{\\alpha_S(\\mu_0^2)}{\\alpha_S(\\mu^2)}\n            + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0}\n        }{1 + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0}}\n    )\n    + 1\n    - \\frac{\\alpha_S(\\mu_0^2)}{\\alpha_S(\\mu^2)}\n    + \\order{\\alpha_S^2}\n\\end{equation*}\n'
 
 s = r'''
 \begin{equation*}
@@ -669,7 +591,7 @@ Now that we know $K$, the only thing we need to compute to calculate $U$ is the 
 \end{align*}
 One can solve for $\alpha_S(\mu^2)$ in terms of the Lambert W function \cite{Brodsky16, Karliner98}, but we are only interested in the ratio up to $\order{\alpha_S^2}$ corrections, so we can solve it as
 '''
-assert TeXFormatter(s) == '\n\\begin{equation*}\n    \\left(2 \\pi b_0 + \\gamma_i - \\gamma_j\\right) K_{ij}^{(1)}\n    = \\frac{\\pi b_1}{b_0} \\gamma_i \\delta_{ij} - \\Gamma_{ij}^{(2)}\n\\end{equation*}\n\\begin{equation*}\n    K_{ij}^{(1)}\n    = \\frac{b_1}{2 b^2_0} \\gamma_i \\delta_{ij} - \\frac{\\Gamma_{ij}^{(2)}}{\n        \\left(2 \\pi b_0 + \\gamma_i - \\gamma_j\\right)\n    }\n\\end{equation*}\nThis can be continued to obtain higher order expansions, for example the\n$\\order{\\alpha_S}$ coefficient gives us an equation to find $K^{(2)}$\n\\begin{equation*}\n    4 \\pi b_0 K^{(2)} - \\comm{K^{(2)}}{\\Gamma^{(1)}}\n    = \\frac{\\pi b_1}{b_0} \\Gamma^{(1)} K^{(1)}\n    - \\Gamma^{(2)} K^{(1)}\n    + \\frac{\\pi^2 b_2}{b_0} \\Gamma^{(1)}\n    - \\frac{\\pi^2 b_1^2}{b_0^2} \\Gamma^{(1)}\n    + \\frac{\\pi b_1}{b_0} \\Gamma^{(2)}\n    - \\Gamma^{(3)}\n\\end{equation*}\nBut $K^{(1)}$ is enough for our purposes.\n\nNow that we know $K$, the only thing we need to compute to calculate\n$U$ is the ratio between $\\alpha_S(\\mu_0^2)$ and $\\alpha_S(\\mu^2)$,\nto do it we can use the beta function:\n\\begin{align*}\n    - b_0 \\log(\\frac{\\mu^2}{\\mu_0^2}) &\n    = \\int_{\\alpha_S(\\mu^2_0)}^{\\alpha_S(\\mu^2)}\n    \\frac{-2 b_0}{\\beta(\\alpha_S)} \\dd{\\alpha_S}\n    = \\int_{\\alpha_S(\\mu^2_0)}^{\\alpha_S(\\mu^2)} \\frac{b_0}{\n        \\alpha^2_S \\left(b_0 + \\alpha_S b_1\\right)\n    } \\dd{\\alpha_S} + \\order{\\alpha_S} \\\\&\n    = \\left(\n        \\frac{b_1}{b_0} \\log(\n            \\frac{1}{\\alpha_S(\\mu^2)} + \\frac{b_1}{b_0}\n        ) - \\frac{1}{\\alpha_S(\\mu^2)}\n    \\right) - \\left(\n        \\frac{b_1}{b_0} \\log(\n            \\frac{1}{\\alpha_S(\\mu_0^2)} + \\frac{b_1}{b_0}\n        ) - \\frac{1}{\\alpha_S(\\mu_0^2)}\n    \\right) + \\order{\\alpha_S}\n\\end{align*}\nOne can solve for $\\alpha_S(\\mu^2)$ in terms of the\nLambert W function \\cite{Brodsky16, Karliner98},\nbut we are only interested in the ratio up to $\\order{\\alpha_S^2}$ corrections,\nso we can solve it as\n'
+assert TeXFormatter(s) == '\n\\begin{equation*}\n    \\left(2 \\pi b_0 + \\gamma_i - \\gamma_j\\right) K_{ij}^{(1)}\n    = \\frac{\\pi b_1}{b_0} \\gamma_i \\delta_{ij} - \\Gamma_{ij}^{(2)}\n\\end{equation*}\n\\begin{equation*}\n    K_{ij}^{(1)}\n    = \\frac{b_1}{2 b^2_0} \\gamma_i \\delta_{ij}\n    - \\frac{\\Gamma_{ij}^{(2)}}{\\left(2 \\pi b_0 + \\gamma_i - \\gamma_j\\right)}\n\\end{equation*}\nThis can be continued to obtain higher order expansions, for example the\n$\\order{\\alpha_S}$ coefficient gives us an equation to find $K^{(2)}$\n\\begin{equation*}\n    4 \\pi b_0 K^{(2)} - \\comm{K^{(2)}}{\\Gamma^{(1)}}\n    = \\frac{\\pi b_1}{b_0} \\Gamma^{(1)} K^{(1)}\n    - \\Gamma^{(2)} K^{(1)}\n    + \\frac{\\pi^2 b_2}{b_0} \\Gamma^{(1)}\n    - \\frac{\\pi^2 b_1^2}{b_0^2} \\Gamma^{(1)}\n    + \\frac{\\pi b_1}{b_0} \\Gamma^{(2)}\n    - \\Gamma^{(3)}\n\\end{equation*}\nBut $K^{(1)}$ is enough for our purposes.\n\nNow that we know $K$, the only thing we need to compute to calculate\n$U$ is the ratio between $\\alpha_S(\\mu_0^2)$ and $\\alpha_S(\\mu^2)$,\nto do it we can use the beta function:\n\\begin{align*}\n    - b_0 \\log(\\frac{\\mu^2}{\\mu_0^2}) &\n    = \\int_{\\alpha_S(\\mu^2_0)}^{\\alpha_S(\\mu^2)}\n    \\frac{-2 b_0}{\\beta(\\alpha_S)} \\dd{\\alpha_S}\n    = \\int_{\\alpha_S(\\mu^2_0)}^{\\alpha_S(\\mu^2)} \\frac{b_0}{\n        \\alpha^2_S \\left(b_0 + \\alpha_S b_1\\right)\n    } \\dd{\\alpha_S}\n    + \\order{\\alpha_S} \\\\&\n    = \\left(\n        \\frac{b_1}{b_0} \\log(\\frac{1}{\\alpha_S(\\mu^2)} + \\frac{b_1}{b_0})\n        - \\frac{1}{\\alpha_S(\\mu^2)}\n    \\right)\n    - \\left(\n        \\frac{b_1}{b_0} \\log(\\frac{1}{\\alpha_S(\\mu_0^2)} + \\frac{b_1}{b_0})\n        - \\frac{1}{\\alpha_S(\\mu_0^2)}\n    \\right)\n    + \\order{\\alpha_S}\n\\end{align*}\nOne can solve for $\\alpha_S(\\mu^2)$ in terms of the\nLambert W function \\cite{Brodsky16, Karliner98},\nbut we are only interested in the ratio up to $\\order{\\alpha_S^2}$ corrections,\nso we can solve it as\n'
 
 s = r'''
 \begin{equation*}
@@ -677,7 +599,7 @@ s = r'''
     = \frac{b_1}{2 b^2_0}\gamma_i\delta_{ij} - \frac{1}{2\pi b_0}\Gamma_{ij}^{(2)}
 \end{equation*}
 '''
-assert TeXFormatter(s) == '\n\\begin{equation*}\n    K_{ij}^{(1)} - \\frac{1}{2 \\pi b_0}(\n        K_{ij}^{(1)} \\gamma_j - \\gamma_i K_{ij}^{(1)}\n    )\n    = \\frac{b_1}{2 b^2_0} \\gamma_i \\delta_{ij}\n    - \\frac{1}{2 \\pi b_0} \\Gamma_{ij}^{(2)}\n\\end{equation*}\n'
+assert TeXFormatter(s) == '\n\\begin{equation*}\n    K_{ij}^{(1)}\n    - \\frac{1}{2 \\pi b_0}(K_{ij}^{(1)} \\gamma_j - \\gamma_i K_{ij}^{(1)})\n    = \\frac{b_1}{2 b^2_0} \\gamma_i \\delta_{ij}\n    - \\frac{1}{2 \\pi b_0} \\Gamma_{ij}^{(2)}\n\\end{equation*}\n'
 
 s = r'''
 \begin{align*}
@@ -693,7 +615,7 @@ thus, comparing the $\order{1}$ coefficients in \eqref{eq:diffeqn} we obtain
 \end{equation*}
 In the eigenbasis of $\Gamma^{(1)}$, we can write
 '''
-assert TeXFormatter(s) == '\n\\begin{align*}\n    \\frac{\\Gamma(\\alpha_S)}{\\beta(\\alpha_S)} &\n    = \\frac{-1}{2 \\pi \\alpha_S b_0} \\left(\n        \\Gamma^{(1)}\n        + \\left(\\frac{\\alpha_S}{\\pi}\\right) \\Gamma^{(2)}\n        + \\order{\\alpha_S^2}\n    \\right) \\left(\n        1 + \\alpha_S \\frac{b_1}{b_0} + \\order{\\alpha_S^2}\n    \\right)^{-1} \\\\&\n    = \\frac{-1}{2 \\pi \\alpha_S b_0} \\left(\n        \\Gamma^{(1)} + \\left(\\frac{\\alpha_S}{\\pi}\\right) \\Gamma^{(2)}\n    \\right) \\left(1 - \\alpha_S \\frac{b_1}{b_0}\\right) + \\order{\\alpha_S} \\\\&\n    = \\frac{-1}{2 \\pi \\alpha_S b_0} \\left(\n        \\Gamma^{(1)}\n        - \\alpha_S \\frac{b_1}{b_0} \\Gamma^{(1)}\n        + \\left(\\frac{\\alpha_S}{\\pi}\\right) \\Gamma^{(2)}\n    \\right) + \\order{\\alpha_S}\n\\end{align*}\nthus, comparing the $\\order{1}$ coefficients in \\eqref{eq:diffeqn} we obtain\n\\begin{equation*}\n    K^{(1)} - \\frac{1}{2 \\pi b_0} \\comm{K^{(1)}}{\\Gamma^{(1)}}\n    = \\frac{b_1}{2 b^2_0} \\Gamma^{(1)} - \\frac{1}{2 \\pi b_0} \\Gamma^{(2)}\n\\end{equation*}\nIn the eigenbasis of $\\Gamma^{(1)}$, we can write\n'
+assert TeXFormatter(s) == '\n\\begin{align*}\n    \\frac{\\Gamma(\\alpha_S)}{\\beta(\\alpha_S)} &\n    = \\frac{-1}{2 \\pi \\alpha_S b_0} \\left(\n        \\Gamma^{(1)}\n        + \\left(\\frac{\\alpha_S}{\\pi}\\right) \\Gamma^{(2)}\n        + \\order{\\alpha_S^2}\n    \\right) \\left(\n        1 + \\alpha_S \\frac{b_1}{b_0} + \\order{\\alpha_S^2}\n    \\right)^{-1} \\\\&\n    = \\frac{-1}{2 \\pi \\alpha_S b_0} \\left(\n        \\Gamma^{(1)} + \\left(\\frac{\\alpha_S}{\\pi}\\right) \\Gamma^{(2)}\n    \\right) \\left(1 - \\alpha_S \\frac{b_1}{b_0}\\right)\n    + \\order{\\alpha_S} \\\\&\n    = \\frac{-1}{2 \\pi \\alpha_S b_0} \\left(\n        \\Gamma^{(1)}\n        - \\alpha_S \\frac{b_1}{b_0} \\Gamma^{(1)}\n        + \\left(\\frac{\\alpha_S}{\\pi}\\right) \\Gamma^{(2)}\n    \\right)\n    + \\order{\\alpha_S}\n\\end{align*}\nthus, comparing the $\\order{1}$ coefficients in \\eqref{eq:diffeqn} we obtain\n\\begin{equation*}\n    K^{(1)} - \\frac{1}{2 \\pi b_0} \\comm{K^{(1)}}{\\Gamma^{(1)}}\n    = \\frac{b_1}{2 b^2_0} \\Gamma^{(1)} - \\frac{1}{2 \\pi b_0} \\Gamma^{(2)}\n\\end{equation*}\nIn the eigenbasis of $\\Gamma^{(1)}$, we can write\n'
 
 s = r'''
 Expanding $K$ in powers of $\alpha_S$
