@@ -6,11 +6,16 @@ Created on Thu Dec 28 10:42:48 2023
 @author: Roger Balsach
 """
 
-# import pathlib
+import pathlib
 import functools
 import re
+import sys
 
 import numpy as np
+
+
+# TODO: Add CLI interface
+# TODO: Implement read from file properly
 
 
 class TeXFormatter:
@@ -53,9 +58,9 @@ class TeXFormatter:
             line = line.expandtabs(4)
             # Calculate the indent of the line, remove spaces in the beginning
             # of the line.
-            if line.startswith('%'):
+            if line.lstrip().startswith('%'):
                 indent = (len(line[1:]) - len(line.lstrip(' %'))) // 4 * 4
-                line = '%' + ' ' * indent + line[1:].lstrip()
+                line = '%' + ' ' * indent + line.lstrip(' %')
             else:
                 indent = (len(line) - len(line.lstrip())) // 4 * 4
                 line = ' ' * indent + line.lstrip()
@@ -169,6 +174,7 @@ class TeXFormatter:
                 new_content.extend(self._format_equation(line))
         # Combine the lines to avoid lines too short
         if not first:
+            print(line)
             new_content = self.combine_lines(new_content)
         return new_content
 
@@ -303,6 +309,8 @@ class TeXFormatter:
             return self.line_split(line, '\s\$\$', keep=True)
         # Split {} into multiple lines
         for (start, end), char in parenthesis:
+            if start is None or end is None:
+                continue
             if end - start > 40 and char == '{':
                 pass
             elif end - start > 75 and char == '(':
@@ -316,8 +324,9 @@ class TeXFormatter:
             new_lines.append(self.indent + line[end:].lstrip())
         if new_lines:
             return self.format_tex(new_lines)
-        else:
+        if ' ' in skeleton:
             return self.line_split(line, ' ', keep=False)
+        return [line]
 
     def _format_equation(self, line):
         skeleton, _ = self.get_skeleton(line, self.multline_parenthesis)
@@ -429,7 +438,7 @@ class TeXFormatter:
     @functools.cache
     def get_skeleton(cls, line, unmatched_parenthesis=''):
         parenthesis = cls._find_parenthesis(line, unmatched_parenthesis)
-        skeleton = line.strip()
+        skeleton = line.strip(' %')
         offset = len(line) - len(skeleton)
         for (start, end), _ in parenthesis:
             try:
@@ -532,13 +541,31 @@ class TeXFormatter:
         return NotImplemented
 
 s = r'''
-\caption{Potential of the form $\frac{1}{2}\mu^2\phi^2 +\frac{1}{4}\lambda \phi^4$ with $\lambda>0$, for a) $\mu^2>0$ and b) $\mu^2<0$. Case b) corresponds to spontaneous symmetry breaking. Figure from source \cite{ModernParticlePhysics}.}
+\begin{align}
+    u&=\sqrt{\Vec{k}_2^2+m_1^2}+\sqrt{\Vec{k}_2^2+m_2^2} \\
+    \Longrightarrow \ u^2-2|\Vec{k}_2|^2-m_1^2-m_2^2&=2 \sqrt{\Vec{k}_2^2+m_1^2}\sqrt{\Vec{k}_2^2+m_2^2} \ .
+\end{align}
 '''
 r = TeXFormatter(s)
 print(r)
 
+# if __name__ == '__main__':
+#     pathdir = pathlib.Path.cwd()
+#     filename = pathdir / pathlib.Path(sys.argv[1])
+#     print(filename)
+#     dest = pathdir / pathlib.Path(sys.argv[1] + '_1')
+#     with filename.open() as file:
+#         content = file.readlines()
+#     new_content = TeXFormatter(content).formatted_lines
+#     with filename.open('w') as file:
+#         file.writelines(new_content)
 
 ### TESTS ###
+
+s = r'''
+% This makes it interesting because the high mass causes a particularly strong interaction with the Higgs boson, one of the mediators in the Standard Model. Therefore it is interesting to study the interaction of the top quark with the Higgs boson with the aim of verifying the predictions of the Standard Model.
+'''
+assert TeXFormatter(s) == '\n%This makes it interesting because the high mass causes a particularly\n%strong interaction with the Higgs boson,\n%one of the mediators in the Standard Model.\n%Therefore it is interesting to study the\n%interaction of the top quark with the Higgs boson with the aim of\n%verifying the predictions of the Standard Model.\n'
 
 s = r'''
 \begin{equation*}
