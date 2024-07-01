@@ -6,11 +6,16 @@ Created on Thu Dec 28 10:42:48 2023
 @author: Roger Balsach
 """
 
-# import pathlib
+import pathlib
 import functools
 import re
+import sys
 
 import numpy as np
+
+
+# TODO: Add CLI interface
+# TODO: Implement read from file properly
 
 
 class TeXFormatter:
@@ -53,9 +58,9 @@ class TeXFormatter:
             line = line.expandtabs(4)
             # Calculate the indent of the line, remove spaces in the beginning
             # of the line.
-            if line.startswith('%'):
+            if line.lstrip().startswith('%'):
                 indent = (len(line[1:]) - len(line.lstrip(' %'))) // 4 * 4
-                line = '%' + ' ' * indent + line[1:].lstrip()
+                line = '%' + ' ' * indent + line.lstrip(' %')
             else:
                 indent = (len(line) - len(line.lstrip())) // 4 * 4
                 line = ' ' * indent + line.lstrip()
@@ -169,6 +174,7 @@ class TeXFormatter:
                 new_content.extend(self._format_equation(line))
         # Combine the lines to avoid lines too short
         if not first:
+            print(line)
             new_content = self.combine_lines(new_content)
         return new_content
 
@@ -303,6 +309,8 @@ class TeXFormatter:
             return self.line_split(line, '\s\$\$', keep=True)
         # Split {} into multiple lines
         for (start, end), char in parenthesis:
+            if start is None or end is None:
+                continue
             if end - start > 40 and char == '{':
                 pass
             elif end - start > 75 and char == '(':
@@ -316,8 +324,9 @@ class TeXFormatter:
             new_lines.append(self.indent + line[end:].lstrip())
         if new_lines:
             return self.format_tex(new_lines)
-        else:
+        if ' ' in skeleton:
             return self.line_split(line, ' ', keep=False)
+        return [line]
 
     def _format_equation(self, line):
         skeleton, _ = self.get_skeleton(line, self.multline_parenthesis)
@@ -429,7 +438,7 @@ class TeXFormatter:
     @functools.cache
     def get_skeleton(cls, line, unmatched_parenthesis=''):
         parenthesis = cls._find_parenthesis(line, unmatched_parenthesis)
-        skeleton = line.strip()
+        skeleton = line.strip(' %')
         offset = len(line) - len(skeleton)
         for (start, end), _ in parenthesis:
             try:
