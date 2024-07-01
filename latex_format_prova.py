@@ -15,11 +15,13 @@ import numpy as np
 
 class TeXFormatter:
     # TODO: Manage comments
+    # TODO: Manage text environments inside equations
     def __init__(self, content):
         if isinstance(content, str):
             content = content.splitlines(keepends=True)
         self.init_string = content.copy()
         self.reset_context()
+        self.multline_parenthesis = ''
         format_content = self._format_spaces(content)
         self.indent = ''
         self.formatted_lines = self.format_tex(format_content, first=True)
@@ -32,7 +34,7 @@ class TeXFormatter:
         if '\\begin' in line:
             if 'equation' in line or 'align' in line:
                 self._context.append('equation')
-            elif 'document' in line:
+            elif 'document' in line or 'figure' in line:
                 self._context.append('text')
             else:
                 from warnings import warn
@@ -48,11 +50,15 @@ class TeXFormatter:
         for i, line in enumerate(lines):
             self.update_context(line)
             # Replate all tabs by spaces
-            line.expandtabs(4)
+            line = line.expandtabs(4)
             # Calculate the indent of the line, remove spaces in the beginning
             # of the line.
-            indent = (len(line) - len(line.lstrip())) // 4 * 4
-            line = ' ' * indent + line.lstrip()
+            if line.startswith('%'):
+                indent = (len(line[1:]) - len(line.lstrip(' %'))) // 4 * 4
+                line = '%' + ' ' * indent + line[1:].lstrip()
+            else:
+                indent = (len(line) - len(line.lstrip())) // 4 * 4
+                line = ' ' * indent + line.lstrip()
             # Remove double spaces (except for the indent)
             while '  ' in line[indent:]:
                 line = ' ' * indent + line.lstrip().replace('  ', ' ')
@@ -62,7 +68,9 @@ class TeXFormatter:
                 add_space = self._format_spaces_addspace(line)
             elif self.context == 'text':
                 add_space = []
-                list_parenthesis = [self._find_parenthesis(line)]
+                list_parenthesis = [
+                    self._find_parenthesis(line, self.multline_parenthesis)
+                ]
                 while list_parenthesis:
                     parenthesis = list_parenthesis.pop()
                     for (start, end), char in parenthesis:
@@ -115,14 +123,15 @@ class TeXFormatter:
     def _format_spaces_operation(self, line, offset=0):
         add_space = []
         # Add a space before an operation, unless preceeded
-        # by a parenthesis
-        for match in re.finditer(r'([^\s\(\[\{])[\+\-/=]', line):
+        # by a parenthesis or exponent (^)
+        for match in re.finditer(r'([^\s\(\[\{\^])[\+\-/=\<\>]', line):
             if not match.group(1) == ' ':
                 add_space.append(offset + match.start(1) + 1)
             else:
                 assert False
-        # Add a space after an operation if not preceded by {.
-        for match in re.finditer(r'[^\{\(\[][\+/=\-](?!\s)', line):
+        # Add a space after an operation if not preceded by parenthesis
+        # or followed by EOL.
+        for match in re.finditer(r'[^\{\(\[][\+/=\-\<](?!\s|$)', line):
             add_space.append(offset + match.end())
         return add_space
 
@@ -132,7 +141,12 @@ class TeXFormatter:
             # Detect when we are inside an environment
             self.update_context(line)
             # Compute the indent of the line
-            self.indent = ' ' * (len(line) - len(line.lstrip()))
+            if line.startswith('%'):
+                self.indent = '%'
+                level = (len(line[1:]) - len(line.lstrip(' %')))
+                self.indent += ' ' * level
+            else:
+                self.indent = ' ' * (len(line) - len(line.lstrip()))
             # If line is shoft enough, leave it as it is
             if len(line) <= 80:
                 if not first and self.context == 'equation':
@@ -145,6 +159,7 @@ class TeXFormatter:
                     if ret is not None:
                         new_content.extend(ret)
                         continue
+                self.update_multiline_parenthesis(line)
                 new_content.append(line + '\n')
                 continue
             # Format the line according to the actual context
@@ -159,7 +174,7 @@ class TeXFormatter:
 
     def combine_lines(self, content):
         index_mask = [True,] * (len(content) - 1)
-        while True:
+        while len(content) > 1:
             lengths = np.asarray(list(map(len, content)))
             comb_len = lengths[1:] + lengths[:-1]
             valid_comb = comb_len[(comb_len <= 80) & index_mask]
@@ -180,18 +195,30 @@ class TeXFormatter:
                 index_mask[idx] = False
                 continue
             content.pop(idx + 1)
-            content[idx] = first.rstrip() + ' ' + second.lstrip()
+            space = ' '
+            # why does the first need to be alnum?
+            # if not first[-1].isalnum() and second[0] in {'.', ','}:
+            if second.lstrip(' %')[0] in {'.', ','}:
+                space = ''
+            content[idx] = first.rstrip() + space + second.lstrip(' %')
             index_mask.pop(idx)
         return content
 
     def allow_combine(self, _first, _second):
         if re.search(r'(?:\w{3,}|\W)\.$', _first.strip()):
             return False
-        first = _first.strip().endswith
-        second = _second.strip().startswith
+        first = _first.strip()
+        second = _second.strip()
+        if first == '$' or second == '$':
+            return False
+        if (first[0]=='%') ^ (second[0]=='%'):
+            return False
+        first = first.strip(' %').endswith
+        second = second.strip(' %').startswith
         if second('=') or second('+') or second('-'):
             return False
-        if second('\\equiv') or second('\\cong') or second('\\to'):
+        if (second('\\equiv') or second('\\cong') or second('\\Longrightarrow')
+                or second('\\to')):
             return False
         if second('\\qquad') or second('\\quad'):
             return False
@@ -208,35 +235,34 @@ class TeXFormatter:
     def line_split(self, line, pattern, keep=False):
         if not isinstance(pattern, re.Pattern):
             pattern = re.compile(pattern)
-        skeleton, _ = self.get_skeleton(line)
+        skeleton, _,  = self.get_skeleton(line, self.multline_parenthesis)
         lines = []
-        idx_s = 0
         prev_idx = 0
         for match in pattern.finditer(skeleton):
-            idx_s = match.start()
-            idx_l = self.get_index_line(idx_s, line)
-            lenstring = len(match.group(0))
+            start = self.get_index_line(match.start(), line)
+            end = self.get_index_line(match.end(), line)
             if keep == 'first':
-                lines.append(line[prev_idx:idx_l+lenstring])
-                prev_idx = idx_l + lenstring
+                lines.append(line[prev_idx:end])
+                prev_idx = end
             elif keep == 'second':
-                lines.append(line[prev_idx:idx_l])
-                prev_idx = idx_l
+                lines.append(line[prev_idx:start])
+                prev_idx = start
             elif keep is True:
-                lines.append(line[prev_idx:idx_l])
-                lines.append(line[idx_l:idx_l+lenstring])
-                prev_idx = idx_l + lenstring
+                lines.append(line[prev_idx:start])
+                lines.append(line[start:end])
+                prev_idx = end
             elif keep is False:
-                lines.append(line[prev_idx:idx_l])
-                prev_idx = idx_l + lenstring
+                lines.append(line[prev_idx:start])
+                prev_idx = end
         lines.append(line[prev_idx:])
         lines = [line for line in lines if line]
-        new_lines = map(lambda s: self.indent + s.strip() + '\n', lines)
+        new_lines = map(lambda s: self.indent + s.lstrip(' %').rstrip() + '\n',
+                        lines)
         return self.format_tex(new_lines)
 
     def get_index_line(self, idx, line):
         idx_l = len(self.indent) + idx
-        parenthesis = self._find_parenthesis(line)
+        parenthesis = self._find_parenthesis(line, self.multline_parenthesis)
         for (start, end), _ in parenthesis:
             if start is None:
                 idx_l = end + idx
@@ -247,36 +273,45 @@ class TeXFormatter:
         return idx_l
 
     def _format_text(self, line):
-        skeleton, parenthesis = self.get_skeleton(line)
-        prev = 0
+        skeleton, parenthesis = self.get_skeleton(line,
+                                                  self.multline_parenthesis)
         new_lines = []
         # Split phases (separated by . or ?) into multiple lines
-        for match in re.finditer(r'(?:\w{3,}|\W)[\.\?]', skeleton[:-1]):
-            idx = self.get_index_line(match.end(), line)
-            new_lines.append(self.indent + line[prev:idx].lstrip())
-            prev = idx
-        if new_lines:
-            new_lines.append(self.indent + line[prev:].lstrip())
-            return self.format_tex(new_lines)
+        pattern = re.compile(r'[\.\?]\s(?=[A-Z])')
+        if pattern.search(skeleton[:-1]):
+            return self.line_split(line, pattern, keep='first')
+        # Split the line by ':'
+        elif ':' in skeleton[:-1]:
+            return self.line_split(line, ':', keep='first')
         # Split the line by ','
         elif ',' in skeleton[:-1]:
             return self.line_split(line, ',', keep='first')
         # Split the formulas into a new line.
-        elif '$' in skeleton[2:]:
-            n = line.find('$', 1)
-            if line.strip().startswith('$'):
-                n = line.find('$', n+1)
-                if n == -1:
-                    raise NotImplementedError(f'line {line} not splitted.')
-            new_lines = [line[:n], self.indent + line[n:]]
-            return self.format_tex(new_lines)
+        if skeleton == '$$':
+            start = self.get_index_line(0, line)
+            end = self.get_index_line(1, line)
+            new_lines.append(line[:start+1])
+            self._context.append('equation')
+            indent = self.indent
+            new_lines.extend(self.format_tex(
+                [indent + 4 * ' ' + line[start+1:end].lstrip()]
+            ))
+            self._context.pop()
+            new_lines.append(indent + line[end:].lstrip())
+            return self.format_tex(filter(lambda x: x, new_lines))
+        if ' $$' in skeleton:
+            return self.line_split(line, '\s\$\$', keep=True)
         # Split {} into multiple lines
         for (start, end), char in parenthesis:
-            if end - start < 40 or char != '{':
+            if end - start > 40 and char == '{':
+                pass
+            elif end - start > 75 and char == '(':
+                pass
+            else:
                 continue
-            new_lines.append(self.indent + line[:start + 1].lstrip())
+            new_lines.append(self.indent + line[:start+1].lstrip() + '%')
             new_lines.append(
-                self.indent + 4 * ' ' + line[start+1:end].lstrip()
+                self.indent + 4 * ' ' + line[start+1:end].lstrip() + '%'
             )
             new_lines.append(self.indent + line[end:].lstrip())
         if new_lines:
@@ -285,12 +320,12 @@ class TeXFormatter:
             return self.line_split(line, ' ', keep=False)
 
     def _format_equation(self, line):
-        skeleton, _ = self.get_skeleton(line)
+        skeleton, _ = self.get_skeleton(line, self.multline_parenthesis)
         # If equation separator (quad) or equality is present, split line.
         pattern = re.compile(r'\\quad|\\qquad')
         if pattern.search(skeleton[1:]):
             return self.line_split(line, pattern, keep=True)
-        pattern = re.compile(r'=|\\equiv|\\cong|\\to')
+        pattern = re.compile(r'=|\\equiv|\\cong|\\to|\\Longrightarrow')
         if pattern.search(skeleton[1:]):
             return self.line_split(line, pattern, keep='second')
         # If unmatched parenthesis, split right after/before.
@@ -316,7 +351,7 @@ class TeXFormatter:
         raise NotImplementedError(f'line "{line}" not splitted.')
 
     def split_sums(self, line):
-        skeleton, _ = self.get_skeleton(line)
+        skeleton, _ = self.get_skeleton(line, self.multline_parenthesis)
         new_lines = []
         prev_idx = 0
         # TODO: Handle cases like \cong - 3, etc.
@@ -331,7 +366,7 @@ class TeXFormatter:
             return self.format_tex(new_lines)
 
     def check_unmatched_parenthesis(self, line):
-        parenthesis = self._find_parenthesis(line)
+        parenthesis = self._find_parenthesis(line, self.multline_parenthesis)
         for (start, end), _ in parenthesis:
             if start is None and end > len(self.indent):
                 if end > 5 and line[end-6:end] == '\\right':
@@ -352,7 +387,7 @@ class TeXFormatter:
             return self.format_tex(new_lines)
 
     def split_large_parenthesis(self, line):
-        parenthesis = self._find_parenthesis(line)
+        parenthesis = self._find_parenthesis(line, self.multline_parenthesis)
         for (start, end), _ in parenthesis:
             if end is None or start is None or end - start < 30:
                 continue
@@ -366,7 +401,7 @@ class TeXFormatter:
             return self.format_tex(new_lines)
 
     def split_after_parenthesis(self, line):
-        parenthesis = self._find_parenthesis(line)
+        parenthesis = self._find_parenthesis(line, self.multline_parenthesis)
         for (start, end), char in reversed(parenthesis):
             if end > 80:
                 continue
@@ -376,10 +411,24 @@ class TeXFormatter:
                          self.indent + line[end+1:].strip() + '\n']
             return self.format_tex(new_lines)
 
+    def update_multiline_parenthesis(self, line):
+        if 'phantom' in line:
+            return
+        open_p = '([{$'
+        close_p = ')]}$'
+        parenthesis = self._find_parenthesis(line, self.multline_parenthesis)
+        for ((start, end), char) in parenthesis:
+            if start is None:
+                _char = self.multline_parenthesis[-1]
+                assert close_p.index(char) == open_p.index(_char), (char, _char)
+                self.multline_parenthesis = self.multline_parenthesis[:-1]
+            elif end is None:
+                self.multline_parenthesis += char
+
     @classmethod
     @functools.cache
-    def get_skeleton(cls, line):
-        parenthesis = cls._find_parenthesis(line)
+    def get_skeleton(cls, line, unmatched_parenthesis=''):
+        parenthesis = cls._find_parenthesis(line, unmatched_parenthesis)
         skeleton = line.strip()
         offset = len(line) - len(skeleton)
         for (start, end), _ in parenthesis:
@@ -397,11 +446,16 @@ class TeXFormatter:
 
     @staticmethod
     @functools.cache
-    def _find_parenthesis(line):
+    def _find_parenthesis(line, unmatched_parenthesis=''):
+        # IDEA: unatched parenthesis is a string containing multiline parenthesis
+        # This function must treat this locally, a higher function should keep track of everything
+        # There should be an instance attribute containing the multiline parenthesis
+        # When a line is splitted, make sure to remove the parenthesis from multiline to avoid
+        # double counting.
         open_p = '([{$'
         close_p = ')]}'
-        current_struct = {}
-        parenthesis_structure = current_struct
+        parenthesis_structure = {}
+        current_struct = parenthesis_structure
         levels = []
         for idx, char in enumerate(line):
             if char in open_p:
@@ -428,11 +482,25 @@ class TeXFormatter:
                         open_p = open_p + '$'
                         close_p = close_p.replace('$', '')
                     elif open_p.index(schar) != close_p.index(char):
-                        return {}
-                        raise ValueError(
+                        if char == ')':
+                            # Assume that ) is not part of a parenthesis
+                            levels.append((start, schar))
+                            continue
+                        raise Exception(
                             f'Parenthesis not well written: {line}'
                         )
                 else:
+                    if unmatched_parenthesis:
+                        schar = unmatched_parenthesis[-1]
+                        if open_p.index(schar) != close_p.index(char):
+                            if char == ')':
+                                continue
+                            raise Exception(
+                                f'Parenthesis not well written: {line}'
+                            )
+                        unmatched_parenthesis = unmatched_parenthesis[:-1]
+                    elif char == ')':
+                        continue
                     start = None
                     schar = char
                     current_struct = {}
@@ -464,18 +532,38 @@ class TeXFormatter:
         return NotImplemented
 
 s = r'''
-\begin{equation*}
-    \boxed{
-        \lag_{\mathrm{eff}}
-        = - \frac{c}{2 m_e^2} F^{\mu \sigma} \partial_{\sigma} \partial^{\nu} F_{\mu \nu}
-    }
-\end{equation*}
+\caption{Potential of the form $\frac{1}{2}\mu^2\phi^2 +\frac{1}{4}\lambda \phi^4$ with $\lambda>0$, for a) $\mu^2>0$ and b) $\mu^2<0$. Case b) corresponds to spontaneous symmetry breaking. Figure from source \cite{ModernParticlePhysics}.}
 '''
 r = TeXFormatter(s)
 print(r)
 
 
 ### TESTS ###
+
+s = r'''
+\begin{equation*}
+    \frac{\alpha_S(\mu_0^2)}{\alpha_S(\mu^2)} = 1 + b_0\alpha_S(\mu_0^2)\log(\frac{\mu^2}{\mu_0^2}) +  \alpha_S(\mu_0^2)\frac{b_1}{b_0}\log(\frac{\frac{\alpha_S(\mu_0^2)}{\alpha_S(\mu^2)}+ \alpha_S(\mu_0^2)\frac{b_1}{b_0}}{1+\alpha_S(\mu_0^2) \frac{b_1}{b_0}}) + \order{\alpha_S^2}
+\end{equation*}
+'''
+assert TeXFormatter(s) == '\n\\begin{equation*}\n    \\frac{\\alpha_S(\\mu_0^2)}{\\alpha_S(\\mu^2)}\n    = 1\n    + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu_0^2})\n    + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0} \\log(\n        \\frac{\n            \\frac{\\alpha_S(\\mu_0^2)}{\\alpha_S(\\mu^2)}\n            + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0}\n        }{1 + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0}}\n    )\n    + \\order{\\alpha_S^2}\n\\end{equation*}\n'
+
+s = r'''
+Doing the same on equation \eqref{eq:Kmatrix}
+\begin{align*}
+    \dv{U(\mu, \mu_0)}{\mu} = & \dv{\alpha_S(\mu^2)}{\mu}\left(\dv{K(\alpha_S(\mu^2))}{\alpha_S}
+    -K(\alpha_S(\mu^2))\frac{\Gamma^{(1)}}{2\pi\alpha_S(\mu^2) b_0}\right)\exp(-\frac{\Gamma^{(1)}}{2\pi b_0}\log(\frac{\alpha_S(\mu^2)}{\alpha_S(\mu_0^2)}))K^{-1}(\alpha_S(\mu_0^2))
+\end{align*}
+'''
+assert TeXFormatter(s) == '\nDoing the same on equation \\eqref{eq:Kmatrix}\n\\begin{align*}\n    \\dv{U(\\mu, \\mu_0)}{\\mu}\n    = & \\dv{\\alpha_S(\\mu^2)}{\\mu} \\left(\n        \\dv{K(\\alpha_S(\\mu^2))}{\\alpha_S}\n        - K(\\alpha_S(\\mu^2)) \\frac{\\Gamma^{(1)}}{2 \\pi \\alpha_S(\\mu^2) b_0}\n    \\right) \\exp(\n        -\\frac{\\Gamma^{(1)}}{2 \\pi b_0} \\log(\n            \\frac{\\alpha_S(\\mu^2)}{\\alpha_S(\\mu_0^2)}\n        )\n    ) K^{-1}(\\alpha_S(\\mu_0^2))\n\\end{align*}\n'
+
+s = r'''
+\begin{align*}
+    \tilde{g}_S\left(\frac{Q}{\bar{N}}, \mu_R\right)&
+    = \frac{1}{2\pi b_0}\left[\log(1 - 2\lambda + b_0\alpha_S(\mu_R^2)\left(\log(\frac{Q^2}{\mu_R^2}) - 2\gamma_E\right)) + \alpha_S(\mu_R^2)\frac{b_1}{b_0}\frac{\log(1-2\lambda)}{1 - 2\lambda}\right] + \order{\alpha_S^2}\\&
+    = \frac{1}{2\pi b_0}\left[\log(1-2\lambda) + \frac{b_0\alpha_S(\mu_R^2)}{1-2\lambda}\left(\log(\frac{Q^2}{\mu_R^2}) - 2\gamma_E\right) + \alpha_S(\mu_R^2)\frac{b_1}{b_0}\frac{\log(1-2\lambda)}{1 - 2\lambda}\right] + \order{\alpha_S^2}
+\end{align*}
+'''
+assert TeXFormatter(s) == '\n\\begin{align*}\n    \\tilde{g}_S \\left(\\frac{Q}{\\bar{N}}, \\mu_R\\right) &\n    = \\frac{1}{2 \\pi b_0} \\left[\n        \\log(\n            1\n            - 2 \\lambda\n            + b_0 \\alpha_S(\\mu_R^2) \\left(\n                \\log(\\frac{Q^2}{\\mu_R^2}) - 2 \\gamma_E\n            \\right)\n        )\n        + \\alpha_S(\\mu_R^2) \\frac{b_1}{b_0}\n        \\frac{\\log(1 - 2 \\lambda)}{1 - 2 \\lambda}\n    \\right]\n    + \\order{\\alpha_S^2} \\\\&\n    = \\frac{1}{2 \\pi b_0} \\left[\n        \\log(1 - 2 \\lambda)\n        + \\frac{b_0 \\alpha_S(\\mu_R^2)}{1 - 2 \\lambda} \\left(\n            \\log(\\frac{Q^2}{\\mu_R^2}) - 2 \\gamma_E\n        \\right)\n        + \\alpha_S(\\mu_R^2) \\frac{b_1}{b_0}\n        \\frac{\\log(1 - 2 \\lambda)}{1 - 2 \\lambda}\n    \\right]\n    + \\order{\\alpha_S^2}\n\\end{align*}\n'
 
 s = r'''
 \begin{align*}
@@ -511,15 +599,6 @@ s = r'''
 assert TeXFormatter(s) == '\n\\begin{align*}\n    S^{(1)} &\n    = S^{(0)} \\left(\n        \\red{\\frac{1}{2}} \\sum C^{ij} S^{ij} + (C_1 + C_2) S^{12}\n    \\right) \\\\&\n    = S^{(0)} \\left(\n        2 C^{12} S^{12}\n        + 2 C^{13} S^{13}\n        + 2 C^{14} S^{14}\n        + 2 C^{23} S^{23}\n        + 2 C^{24} S^{24}\n        + C^{33} S^{33}\n        + 2 C^{34} S^{34}\n        + C^{44} S^{44}\n        + (C_1 + C_2) S^{12}\n    \\right) \\\\&\n    = S^{(0)} \\bigg(\n        C^{34} \\left(2 S^{34} - S^{33} - S^{44}\\right)\n        + C^{13} \\left(2 S^{13} - 2 S^{14} - S^{33} + S^{44}\\right)\n        \\\\& \\phantom{= S^{(0)} \\bigg(}\n        + C^{23} \\left(2 S^{23} - 2 S^{24} - S^{33} + S^{44}\\right)\n        + N_c C_8 \\left(-S^{14} - S^{24} + S^{44}\\right)\n        + (2 C^{12} + C_1 + C_2) S^{12}\n    \\bigg) \\\\&\n    = S^{(0)} \\bigg(\n        C^{34} \\left(2 S^{34} - S^{33} - S^{44}\\right)\n        + 2 C^{13} \\left(S^{13} - S^{14} - S^{23} + S^{24}\\right)\n        \\\\& \\phantom{= S^{(0)} \\bigg(}\n        + \\frac{N_c}{2} C_8 \\left(\n            2 S^{12} - 2 S^{14} - 2 S^{23} + S^{33} + S^{44}\n        \\right)\n    \\bigg)\n\\end{align*}\n'
 
 s = r'''
-\begin{align*}
-    \tilde{g}_S\left(\frac{Q}{\bar{N}}, \mu_R\right)&
-    = \frac{1}{2\pi b_0}\left[\log(1 - 2\lambda + b_0\alpha_S(\mu_R^2)\left(\log(\frac{Q^2}{\mu_R^2}) - 2\gamma_E\right)) + \alpha_S(\mu_R^2)\frac{b_1}{b_0}\frac{\log(1-2\lambda)}{1 - 2\lambda}\right] + \order{\alpha_S^2}\\&
-    = \frac{1}{2\pi b_0}\left[\log(1-2\lambda) + \frac{b_0\alpha_S(\mu_R^2)}{1-2\lambda}\left(\log(\frac{Q^2}{\mu_R^2}) - 2\gamma_E\right) + \alpha_S(\mu_R^2)\frac{b_1}{b_0}\frac{\log(1-2\lambda)}{1 - 2\lambda}\right] + \order{\alpha_S^2}
-\end{align*}
-'''
-assert TeXFormatter(s) == '\n\\begin{align*}\n    \\tilde{g}_S \\left(\\frac{Q}{\\bar{N}}, \\mu_R\\right) &\n    = \\frac{1}{2 \\pi b_0} \\left[\n        \\log(\n            1\n            - 2 \\lambda\n            + b_0 \\alpha_S(\\mu_R^2) \\left(\n                \\log(\\frac{Q^2}{\\mu_R^2}) - 2 \\gamma_E\n            \\right)\n        )\n        + \\alpha_S(\\mu_R^2) \\frac{b_1}{b_0}\n        \\frac{\\log(1 - 2 \\lambda)}{1 - 2 \\lambda}\n    \\right]\n    + \\order{\\alpha_S^2} \\\\&\n    = \\frac{1}{2 \\pi b_0} \\left[\n        \\log(1 - 2 \\lambda)\n        + \\frac{b_0 \\alpha_S(\\mu_R^2)}{1 - 2 \\lambda} \\left(\n            \\log(\\frac{Q^2}{\\mu_R^2}) - 2 \\gamma_E\n        \\right)\n        + \\alpha_S(\\mu_R^2) \\frac{b_1}{b_0}\n        \\frac{\\log(1 - 2 \\lambda)}{1 - 2 \\lambda}\n    \\right]\n    + \\order{\\alpha_S^2}\n\\end{align*}\n'
-
-s = r'''
 \begin{equation*}
     U\left(\frac{Q}{\bar{N}}, \mu_R\right)
     = \left(1 + \frac{\alpha_S(\mu_R^2)}{\pi}\frac{K^{(1)}}{1-2\lambda}\right)e^{\tilde{g}_S\left(\frac{Q}{\bar{N}}, \mu_R\right)\Gamma^{(1)}}\left(1 - \frac{\alpha_S(\mu_R^2)}{\pi}K^{(1)}\right) + \order{\alpha_S^2}
@@ -530,7 +609,7 @@ assert TeXFormatter(s) == '\n\\begin{equation*}\n    U \\left(\\frac{Q}{\\bar{N}
 s = r'''
 In particular, we are interested in evolving $S$ from the scale where renormalization takes place $\mu_0=\mu_R$ to the soft scale $\mu = Q\bar{N}^{-1}$. Where $\bar{N}=Ne^{\gamma_E}$ as defined in \cite{Kulesza17}. Then
 '''
-assert TeXFormatter(s) == '\nIn particular, we are interested in evolving\n$S$ from the scale where renormalization takes place\n$\\mu_0 = \\mu_R$ to the soft scale $\\mu = Q \\bar{N}^{-1}$.\nWhere $\\bar{N} = Ne^{\\gamma_E}$ as defined in \\cite{Kulesza17}.\nThen\n'
+assert TeXFormatter(s) == '\nIn particular, we are interested in evolving $S$\nfrom the scale where renormalization takes place\n$\\mu_0 = \\mu_R$ to the soft scale $\\mu = Q \\bar{N}^{-1}$.\nWhere $\\bar{N} = Ne^{\\gamma_E}$ as defined in \\cite{Kulesza17}.\nThen\n'
 
 s = r'''
 with
@@ -552,13 +631,6 @@ which we can now solve iteratively by substituting the formula onto itself (and 
 Putting everything together in equation \eqref{eq:Kmatrix} we have
 '''
 assert TeXFormatter(s) == '\nwhich we can now solve iteratively by substituting\nthe formula onto itself (and neglecting $\\order{\\alpha_S^2}$ terms).\nNote that $\\mu \\ll \\mu_0$,\nso in general $\\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu^2_0})$\nis not necessarily a small quantity and thus we cannot neglect those terms\n\\begin{align*}\n    \\frac{\\alpha_S(\\mu_0^2)}{\\alpha_S(\\mu^2)} &\n    = 1\n    + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu_0^2})\n    + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0} \\log(\n        1 + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu^2_0}) + \\order{\\alpha_S}\n    )\n    + \\order{\\alpha_S^2} \\\\&\n    = 1\n    + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu_0^2})\n    + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0} \\log(\n        1 + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu^2_0})\n    )\n    + \\order{\\alpha_S^2}\n\\end{align*}\nPutting everything together in equation \\eqref{eq:Kmatrix} we have\n'
-
-s = r'''
-\begin{equation*}
-    \frac{\alpha_S(\mu_0^2)}{\alpha_S(\mu^2)} = 1 + b_0\alpha_S(\mu_0^2)\log(\frac{\mu^2}{\mu_0^2}) +  \alpha_S(\mu_0^2)\frac{b_1}{b_0}\log(\frac{\frac{\alpha_S(\mu_0^2)}{\alpha_S(\mu^2)}+ \alpha_S(\mu_0^2)\frac{b_1}{b_0}}{1+\alpha_S(\mu_0^2) \frac{b_1}{b_0}}) + \order{\alpha_S^2}
-\end{equation*}
-'''
-assert TeXFormatter(s) == '\n\\begin{equation*}\n    \\frac{\\alpha_S(\\mu_0^2)}{\\alpha_S(\\mu^2)}\n    = 1\n    + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu_0^2})\n    + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0} \\log(\n        \\frac{\n            \\frac{\\alpha_S(\\mu_0^2)}{\\alpha_S(\\mu^2)}\n            + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0}\n        }{1 + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0}}\n    )\n    + \\order{\\alpha_S^2}\n\\end{equation*}\n'
 
 s = r'''
 \begin{equation*}
@@ -591,7 +663,7 @@ Now that we know $K$, the only thing we need to compute to calculate $U$ is the 
 \end{align*}
 One can solve for $\alpha_S(\mu^2)$ in terms of the Lambert W function \cite{Brodsky16, Karliner98}, but we are only interested in the ratio up to $\order{\alpha_S^2}$ corrections, so we can solve it as
 '''
-assert TeXFormatter(s) == '\n\\begin{equation*}\n    \\left(2 \\pi b_0 + \\gamma_i - \\gamma_j\\right) K_{ij}^{(1)}\n    = \\frac{\\pi b_1}{b_0} \\gamma_i \\delta_{ij} - \\Gamma_{ij}^{(2)}\n\\end{equation*}\n\\begin{equation*}\n    K_{ij}^{(1)}\n    = \\frac{b_1}{2 b^2_0} \\gamma_i \\delta_{ij}\n    - \\frac{\\Gamma_{ij}^{(2)}}{\\left(2 \\pi b_0 + \\gamma_i - \\gamma_j\\right)}\n\\end{equation*}\nThis can be continued to obtain higher order expansions, for example the\n$\\order{\\alpha_S}$ coefficient gives us an equation to find $K^{(2)}$\n\\begin{equation*}\n    4 \\pi b_0 K^{(2)} - \\comm{K^{(2)}}{\\Gamma^{(1)}}\n    = \\frac{\\pi b_1}{b_0} \\Gamma^{(1)} K^{(1)}\n    - \\Gamma^{(2)} K^{(1)}\n    + \\frac{\\pi^2 b_2}{b_0} \\Gamma^{(1)}\n    - \\frac{\\pi^2 b_1^2}{b_0^2} \\Gamma^{(1)}\n    + \\frac{\\pi b_1}{b_0} \\Gamma^{(2)}\n    - \\Gamma^{(3)}\n\\end{equation*}\nBut $K^{(1)}$ is enough for our purposes.\n\nNow that we know $K$, the only thing we need to compute to calculate\n$U$ is the ratio between $\\alpha_S(\\mu_0^2)$ and $\\alpha_S(\\mu^2)$,\nto do it we can use the beta function:\n\\begin{align*}\n    - b_0 \\log(\\frac{\\mu^2}{\\mu_0^2}) &\n    = \\int_{\\alpha_S(\\mu^2_0)}^{\\alpha_S(\\mu^2)}\n    \\frac{-2 b_0}{\\beta(\\alpha_S)} \\dd{\\alpha_S}\n    = \\int_{\\alpha_S(\\mu^2_0)}^{\\alpha_S(\\mu^2)} \\frac{b_0}{\n        \\alpha^2_S \\left(b_0 + \\alpha_S b_1\\right)\n    } \\dd{\\alpha_S}\n    + \\order{\\alpha_S} \\\\&\n    = \\left(\n        \\frac{b_1}{b_0} \\log(\\frac{1}{\\alpha_S(\\mu^2)} + \\frac{b_1}{b_0})\n        - \\frac{1}{\\alpha_S(\\mu^2)}\n    \\right)\n    - \\left(\n        \\frac{b_1}{b_0} \\log(\\frac{1}{\\alpha_S(\\mu_0^2)} + \\frac{b_1}{b_0})\n        - \\frac{1}{\\alpha_S(\\mu_0^2)}\n    \\right)\n    + \\order{\\alpha_S}\n\\end{align*}\nOne can solve for $\\alpha_S(\\mu^2)$ in terms of the\nLambert W function \\cite{Brodsky16, Karliner98},\nbut we are only interested in the ratio up to $\\order{\\alpha_S^2}$ corrections,\nso we can solve it as\n'
+assert TeXFormatter(s) == '\n\\begin{equation*}\n    \\left(2 \\pi b_0 + \\gamma_i - \\gamma_j\\right) K_{ij}^{(1)}\n    = \\frac{\\pi b_1}{b_0} \\gamma_i \\delta_{ij} - \\Gamma_{ij}^{(2)}\n\\end{equation*}\n\\begin{equation*}\n    K_{ij}^{(1)}\n    = \\frac{b_1}{2 b^2_0} \\gamma_i \\delta_{ij}\n    - \\frac{\\Gamma_{ij}^{(2)}}{\\left(2 \\pi b_0 + \\gamma_i - \\gamma_j\\right)}\n\\end{equation*}\nThis can be continued to obtain higher order expansions,\nfor example the $\\order{\\alpha_S}$\ncoefficient gives us an equation to find $K^{(2)}$\n\\begin{equation*}\n    4 \\pi b_0 K^{(2)} - \\comm{K^{(2)}}{\\Gamma^{(1)}}\n    = \\frac{\\pi b_1}{b_0} \\Gamma^{(1)} K^{(1)}\n    - \\Gamma^{(2)} K^{(1)}\n    + \\frac{\\pi^2 b_2}{b_0} \\Gamma^{(1)}\n    - \\frac{\\pi^2 b_1^2}{b_0^2} \\Gamma^{(1)}\n    + \\frac{\\pi b_1}{b_0} \\Gamma^{(2)}\n    - \\Gamma^{(3)}\n\\end{equation*}\nBut $K^{(1)}$ is enough for our purposes.\n\nNow that we know $K$, the only thing we need to compute to calculate\n$U$ is the ratio between $\\alpha_S(\\mu_0^2)$ and $\\alpha_S(\\mu^2)$,\nto do it we can use the beta function:\n\\begin{align*}\n    - b_0 \\log(\\frac{\\mu^2}{\\mu_0^2}) &\n    = \\int_{\\alpha_S(\\mu^2_0)}^{\\alpha_S(\\mu^2)}\n    \\frac{-2 b_0}{\\beta(\\alpha_S)} \\dd{\\alpha_S}\n    = \\int_{\\alpha_S(\\mu^2_0)}^{\\alpha_S(\\mu^2)} \\frac{b_0}{\n        \\alpha^2_S \\left(b_0 + \\alpha_S b_1\\right)\n    } \\dd{\\alpha_S}\n    + \\order{\\alpha_S} \\\\&\n    = \\left(\n        \\frac{b_1}{b_0} \\log(\\frac{1}{\\alpha_S(\\mu^2)} + \\frac{b_1}{b_0})\n        - \\frac{1}{\\alpha_S(\\mu^2)}\n    \\right)\n    - \\left(\n        \\frac{b_1}{b_0} \\log(\\frac{1}{\\alpha_S(\\mu_0^2)} + \\frac{b_1}{b_0})\n        - \\frac{1}{\\alpha_S(\\mu_0^2)}\n    \\right)\n    + \\order{\\alpha_S}\n\\end{align*}\nOne can solve for $\\alpha_S(\\mu^2)$\nin terms of the Lambert W function \\cite{Brodsky16, Karliner98},\nbut we are only interested in the ratio up to $\\order{\\alpha_S^2}$ corrections,\nso we can solve it as\n'
 
 s = r'''
 \begin{equation*}
@@ -643,15 +715,6 @@ Now, equating both derivatives and using equation \eqref{eq:Kmatrix} for $U$ we 
 assert TeXFormatter(s) == '\nNow, equating both derivatives and using equation \\eqref{eq:Kmatrix} for\n$U$ we arrive at the following equation:\n\\begin{equation*}\n    \\frac{\\Gamma(\\alpha_S)}{\\beta(\\alpha_S)} K(\\alpha_S)\n    = \\dv{K(\\alpha_S)}{\\alpha_S}\n    - K(\\alpha_S) \\frac{\\Gamma^{(1)}}{2 \\pi \\alpha_S b_0}\n\\end{equation*}\n'
 
 s = r'''
-Doing the same on equation \eqref{eq:Kmatrix}
-\begin{align*}
-    \dv{U(\mu, \mu_0)}{\mu} = & \dv{\alpha_S(\mu^2)}{\mu}\left(\dv{K(\alpha_S(\mu^2))}{\alpha_S}
-    -K(\alpha_S(\mu^2))\frac{\Gamma^{(1)}}{2\pi\alpha_S(\mu^2) b_0}\right)\exp(-\frac{\Gamma^{(1)}}{2\pi b_0}\log(\frac{\alpha_S(\mu^2)}{\alpha_S(\mu_0^2)}))K^{-1}(\alpha_S(\mu_0^2))
-\end{align*}
-'''
-assert TeXFormatter(s) == '\nDoing the same on equation \\eqref{eq:Kmatrix}\n\\begin{align*}\n    \\dv{U(\\mu, \\mu_0)}{\\mu}\n    = & \\dv{\\alpha_S(\\mu^2)}{\\mu} \\left(\n        \\dv{K(\\alpha_S(\\mu^2))}{\\alpha_S}\n        - K(\\alpha_S(\\mu^2)) \\frac{\\Gamma^{(1)}}{2 \\pi \\alpha_S(\\mu^2) b_0}\n    \\right) \\exp(\n        -\\frac{\\Gamma^{(1)}}{2 \\pi b_0} \\log(\n            \\frac{\\alpha_S(\\mu^2)}{\\alpha_S(\\mu_0^2)}\n        )\n    ) K^{-1}(\\alpha_S(\\mu_0^2))\n\\end{align*}\n'
-
-s = r'''
 \begin{equation*}
     \dv{U(\mu, \mu_0)}{\mu} = \dv{\alpha_S(\mu^2)}{\mu}\frac{\Gamma(\alpha_S(\mu^2))}{\beta(\alpha_S(\mu^2))}\Pexp{\int_{\alpha_S(\mu^2_0)}^{\alpha_S(\mu^2)} \frac{\Gamma(\alpha_S)}{\beta(\alpha_S)}\dd{\alpha_S}}
     = \dv{\alpha_S(\mu^2)}{\mu}\frac{\Gamma(\alpha_S(\mu^2))}{\beta(\alpha_S(\mu^2))}U(\mu, \mu_0)
@@ -662,7 +725,7 @@ assert TeXFormatter(s) == '\n\\begin{equation*}\n    \\dv{U(\\mu, \\mu_0)}{\\mu}
 s = '''
 However, the consequence is that the non-radiative amplitude in the r.h.s. of eq. \\eqref{eq:NLP} is evaluated using the momenta $p$, which are unphysical for this process, because $\\sum \\eta_i p_i \\neq 0$. This might seem problematic because an amplitude is intrinsically defined for physical momenta, and it is not uniquely defined for unphysical momenta. Therefore, the value of $\\mathcal{H}(p)$ is ambiguous, which translates into an ambiguity on $\\mathcal{A}(p, k)$ and thus seems to invalidate eq. \\eqref{eq:NLP}. The argument, however, is not entirely correct, as shown in \\cite{Balsach:2023ema}. Indeed, although an ambiguity is present, it only affects the NNLP terms.
 '''
-assert TeXFormatter(s) == '\nHowever,\nthe consequence is that the non-radiative amplitude in the r.h.s. of eq.\n\\eqref{eq:NLP} is evaluated using the momenta $p$,\nwhich are unphysical for this process, because $\\sum \\eta_i p_i \\neq 0$.\nThis might seem problematic because an amplitude is\nintrinsically defined for physical momenta,\nand it is not uniquely defined for unphysical momenta.\nTherefore, the value of $\\mathcal{H}(p)$ is ambiguous,\nwhich translates into an ambiguity on\n$\\mathcal{A}(p, k)$ and thus seems to invalidate eq. \\eqref{eq:NLP}.\nThe argument, however, is not entirely correct,\nas shown in \\cite{Balsach:2023ema}.\nIndeed, although an ambiguity is present, it only affects the NNLP terms.\n'
+assert TeXFormatter(s) == '\nHowever,\nthe consequence is that the non-radiative amplitude in the r.h.s. of eq.\n\\eqref{eq:NLP} is evaluated using the momenta $p$,\nwhich are unphysical for this process, because $\\sum \\eta_i p_i \\neq 0$.\nThis might seem problematic because an amplitude is\nintrinsically defined for physical momenta,\nand it is not uniquely defined for unphysical momenta.\nTherefore, the value of $\\mathcal{H}(p)$ is ambiguous,\nwhich translates into an ambiguity on $\\mathcal{A}(p, k)$\nand thus seems to invalidate eq. \\eqref{eq:NLP}.\nThe argument, however, is not entirely correct,\nas shown in \\cite{Balsach:2023ema}.\nIndeed, although an ambiguity is present, it only affects the NNLP terms.\n'
 
 s = r'''
 In order to evolve the soft matrix $S$ from a scale $\mu_0$ to a soft scale
