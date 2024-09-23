@@ -371,7 +371,7 @@ class TeXFormatter:
             return self.line_split(line, ',', keep='first')
         # Split the line by ','
         elif ' and ' in skeleton[:-1]:
-            return self.line_split(line, '(?<=\s)and(?=\s)', keep='first')
+            return self.line_split(line, r'(?<=\s)and(?=\s)', keep='first')
         # Split the formulas into a new line.
         new_lines = []
         if skeleton == '$$':
@@ -388,7 +388,7 @@ class TeXFormatter:
             new_lines.append(indent + line[end:].lstrip())
             return self.format_tex(filter(lambda x: x, new_lines))
         if ' $$' in skeleton:
-            return self.line_split(line, '\s\$\$', keep=True)
+            return self.line_split(line, r'\s\$\$', keep=True)
         # Split {} into multiple lines
         for (start, end), char in parenthesis:
             start = start or 0
@@ -654,42 +654,10 @@ class TeXFormatter:
 
 s = r'''
 \begin{equation*}
-    \mathcal{M}^{-1} \left[1\right](z) = T_{0, 0}
-\end{equation*}
-\begin{equation*}
-    \mathcal{M}^{-1} \left[\log(N)\right](z)
-    = - T_{1, 0}
-    - \frac{720 \zeta_{3}}{\pi^4} T_{0, 1}
-    + \frac{180}{\pi^2} T_{1, 1}
-    - \frac{360}{\pi^4} T_{3, 1}
-\end{equation*}
-\begin{equation*}
-    \mathcal{M}^{-1} \left[\log[2](N)\right](z)
-    = - \frac{\pi^2}{6} T_{0, 0}
-    + 2 T_{2, 0}
-    - \left(\frac{480 \zeta_3}{\pi^4} + 3\right) T_{0, 1}
-    + \frac{120}{\pi^2} T_{1, 1}
-    - \frac{240}{\pi^4} T_{3, 1}
-\end{equation*}
-\begin{equation*}
-    \mathcal{M}^{-1} \left[\log[3](N)\right](z)
-    = - 2 \zeta_3 T_{0, 0}
-    + \frac{\pi^2}{2} T_{1, 0}
-    - 3 T_{3, 0}
-    + \left(-3 + \frac{360\zeta_3}{\pi^2}\right) T_{0, 1}
-    - 81 T_{1, 1}
-    - \frac{180}{\pi^2} T_{3, 1}
-\end{equation*}
-\begin{equation*}
-    \mathcal{M}^{-1} \left[\log[4](N)\right](z)
-    = \frac{\pi^4}{60} T_{0, 0}
-    + 8 \zeta_3 T_{1, 0}
-    - 2 \pi^2 T_{2, 0}
-    + 4 T_{4, 0}
-    + \left(3 \pi^2 + \frac{480 \zeta_3}{\pi^2} + \frac{5760 \zeta_3^2}{\pi^4}\right) T_{0, 1}
-    - \left(\frac{1440\zeta_3}{\pi^2}-108\right) T_{1, 1}
-    - 18 T_{2, 1}
-    + \left(\frac{240}{\pi^2}+\frac{2880\zeta_3}{\pi^4}\right)
+    L_{1}
+    = \frac{2 \alpha_{S}^{2}}{b_{0} \pi^2} \left\{
+        \pi b_{0}^{2} \left(- C_{i} \log(\frac{Q^{2}}{\mu^{2}_{F}})^{2} H^{(0)} S^{(0)} + 2 C_{i} \log(\frac{Q^{2}}{\mu^{2}_{F}}) \log(\frac{Q^{2}}{\mu^{2}_{R}}) H^{(0)} S^{(0)} - 4 \gamma_{E} C_{i} \log(\frac{Q^{2}}{\mu^{2}_{R}}) H^{(0)} S^{(0)} + 4 C_{i} \zeta_{2} H^{(0)} S^{(0)} + 4 \gamma_{E}^{2} C_{i} H^{(0)} S^{(0)} + \log(\frac{Q^{2}}{\mu^{2}_{R}}) H^{(0)} S^{(0)} \Gamma^{(1)} + \log(\frac{Q^{2}}{\mu^{2}_{R}}) H^{(0)} \overline{\Gamma^{(1)}} S^{(0)} + 2 H^{(0)} S^{(0)} K - 2 \gamma_{E} H^{(0)} S^{(0)} \Gamma^{(1)} + 2 H^{(0)} S^{(1)} + 2 H^{(0)} \overline{K} S^{(0)} - 2 \gamma_{E} H^{(0)} \overline{\Gamma^{(1)}} S^{(0)}\right) + b_{0} \left(- 2 A^{(2)} C_{i} \log(\frac{Q^{2}}{\mu^{2}_{F}}) H^{(0)} S^{(0)} + 4 \gamma_{E} A^{(2)} C_{i} H^{(0)} S^{(0)} - C_{i} D^{(2)} H^{(0)} S^{(0)} - 2 C_{i} \log(\frac{Q^{2}}{\mu^{2}_{F}}) H^{(0)} S^{(1)} - 2 C_{i} \log(\frac{Q^{2}}{\mu^{2}_{F}}) H^{(1)} S^{(0)} + 4 \gamma_{E} C_{i} H^{(0)} S^{(1)} + 4 \gamma_{E} C_{i} H^{(1)} S^{(0)} - H^{(0)} S^{(0)} K \Gamma^{(1)} + H^{(0)} S^{(0)} \Gamma^{(1)} K - H^{(0)} S^{(1)} \Gamma^{(1)} + H^{(0)} \overline{K} \overline{\Gamma^{(1)}} S^{(0)} - H^{(0)} \overline{\Gamma^{(1)}} S^{(1)} - H^{(0)} \overline{\Gamma^{(1)}} \overline{K} S^{(0)} - H^{(1)} S^{(0)} \Gamma^{(1)} - H^{(1)} \overline{\Gamma^{(1)}} S^{(0)}\right) - \pi b_{1} \left(H^{(0)} S^{(0)} \Gamma^{(1)} + H^{(0)} \overline{\Gamma^{(1)}} S^{(0)}\right)
+    \right\}
 \end{equation*}
 '''
 r = TeXFormatter(s)
