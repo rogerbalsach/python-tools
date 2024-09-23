@@ -371,7 +371,7 @@ class TeXFormatter:
             return self.line_split(line, ',', keep='first')
         # Split the line by ','
         elif ' and ' in skeleton[:-1]:
-            return self.line_split(line, '(?<=\s)and(?=\s)', keep='first')
+            return self.line_split(line, r'(?<=\s)and(?=\s)', keep='first')
         # Split the formulas into a new line.
         new_lines = []
         if skeleton == '$$':
@@ -388,7 +388,7 @@ class TeXFormatter:
             new_lines.append(indent + line[end:].lstrip())
             return self.format_tex(filter(lambda x: x, new_lines))
         if ' $$' in skeleton:
-            return self.line_split(line, '\s\$\$', keep=True)
+            return self.line_split(line, r'\s\$\$', keep=True)
         # Split {} into multiple lines
         for (start, end), char in parenthesis:
             start = start or 0
