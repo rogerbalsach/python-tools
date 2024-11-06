@@ -6,10 +6,12 @@ Created on Thu Dec 28 10:42:48 2023
 @author: Roger Balsach
 """
 
+from collections.abc import Iterable
 import pathlib
 import functools
 import re
 import sys
+from typing import Optional, Union
 
 import numpy as np
 
@@ -30,14 +32,154 @@ pattern_backslash = re.compile(
 )
 pattern_context = re.compile(rf'({"|".join(context_list)})$')
 
+
+ParenthesisType = dict[
+    tuple[
+        Union[tuple[int, Optional[int]], tuple[Optional[int], int]],
+        str
+    ],
+    'ParenthesisType'
+]
+
+
+class Parenthesis():
+    OPEN_PARENTHESIS = '([{'
+    CLOSE_PARENTHESIS = ')]}'
+
+    def __init__(self) -> None:
+        self.current_struct: ParenthesisType = {}
+        self.parenthesis_structure: ParenthesisType = {}
+
+    def add_open_brace(self, idx: int, char: str) -> None:
+        self.levels.append((idx, char))
+        self.current_struct[((idx, None), char)] = {}
+        self.current_struct = self.current_struct[((idx, None), char)]
+
+    @classmethod
+    def get_match(cls, char: str) -> str:
+        if char in cls.OPEN_PARENTHESIS:
+            return cls.CLOSE_PARENTHESIS[cls.OPEN_PARENTHESIS.index(char)]
+        elif char in cls.CLOSE_PARENTHESIS:
+            return cls.OPEN_PARENTHESIS[cls.CLOSE_PARENTHESIS.index(char)]
+        raise ValueError()
+
+    @classmethod
+    def match(cls, first: str, second: str) -> bool:
+        return first == cls.get_match(second)
+
+    def process_end_equation(self, char: str, idx: int, start: int) -> bool:
+        if char != '$':
+            raise ValueError(
+                f'Parenthesis mismatch in line: {self.line}'
+            )
+        elif self.is_escaped(idx):
+            return True
+        self.in_equation = False
+        return False
+
+    def process_not_match(self, idx: int, char: str, start: int
+                          ) -> tuple[int, str]:
+        if char == ')':
+            # Assume that ) is not part of a parenthesis
+            return start, ''
+        # Check its not a phantom context
+        while self.levels:
+            start, schar = self.levels.pop()
+            if schar == '{' and not self.is_escaped(start):
+                break
+        else:
+            raise Exception(
+                f'Parenthesis not well written: {self.line}'
+            )
+        if char == '}':
+            return start, schar
+        self.levels.append((start, schar))
+        return start, ''
+
+    def process_unmatched(self, unmatched_parenthesis: str, char: str) -> bool:
+        schar = unmatched_parenthesis[-1]
+        if not self.match(schar, char):
+            if char == ')':
+                return True
+            raise Exception(
+                f'Parenthesis not well written in line:\n'
+                f'{self.line}\n'
+                f'Expected: {self.get_match(schar)}, '
+                f'Found: {char}'
+            )
+        unmatched_parenthesis = unmatched_parenthesis[:-1]
+        return False
+
+    def parse(self, line: str, unmatched_parenthesis: str) -> ParenthesisType:
+        self.line = line
+        self.in_equation = False
+        self.parenthesis_structure = {}
+        self.levels: list[tuple[int, str]] = []
+        self.current_struct = self.parenthesis_structure
+
+        for idx, char in enumerate(line):
+            if char in self.OPEN_PARENTHESIS:
+                self.add_open_brace(idx, char)
+
+            elif char == '$' and not self.in_equation:
+                if self.is_escaped(idx):
+                    continue
+                self.add_open_brace(idx, '$')
+                self.in_equation = True
+
+            elif char in self.CLOSE_PARENTHESIS + '$':
+                if self.levels:
+                    start, schar = self.levels.pop()
+                    if schar == '$':
+                        escaped = self.process_end_equation(char, idx, start)
+                        if escaped:
+                            self.levels.append((start, '$'))
+                            continue
+                    elif not self.match(char, schar):
+                        self.levels.append((start, schar))
+                        start, schar = self.process_not_match(idx, char, start)
+                        if not schar:
+                            continue
+                    elif char == '}':
+                        if self.is_escaped(idx):
+                            idx -= 1
+                else:
+                    if unmatched_parenthesis:
+                        escaped = self.process_unmatched(unmatched_parenthesis,
+                                                         char)
+                        if escaped:
+                            continue
+                    elif char == ')':
+                        continue
+                    self.parenthesis_structure = {
+                        ((None, idx), char): self.parenthesis_structure
+                    }
+                    self.current_struct = self.parenthesis_structure
+                    continue
+                self.current_struct = self.update_structure(start, schar, idx)
+        while self.levels:
+            start, schar = self.levels.pop()
+            self.current_struct = self.update_structure(start, schar, None)
+
+        return self.parenthesis_structure
+
+    def is_escaped(self, idx: int) -> bool:
+        return idx > 0 and self.line[idx - 1] == '\\'
+
+    def update_structure(self, start: int, schar: str, idx: Optional[int]
+                         ) -> ParenthesisType:
+        parent_structure = self.parenthesis_structure
+        for idx, char in self.levels:
+            parent_structure = parent_structure[(idx, None), char]
+        parent_structure.pop(((start, None), schar))
+        parent_structure[((start, idx), schar)] = self.current_struct
+        return parent_structure
+
+
 # TODO: Add CLI interface
 # TODO: Implement read from file properly
-
-
 class TeXFormatter:
-    # TODO: Manage comments
-    # TODO: Manage text environments inside equations
-    def __init__(self, content):
+    def __init__(self, content: Union[str, list[str]]) -> None:
         if isinstance(content, str):
             content = content.splitlines(keepends=True)
         self.init_string = content.copy()
@@ -48,10 +190,10 @@ class TeXFormatter:
         self.formatted_lines = self.format_tex(format_content, first=True)
 
     @property
-    def context(self):
+    def context(self) -> str:
         return self._context[-1]
 
-    def update_context(self, line):
+    def update_context(self, line: str) -> None:
         if '\\begin' in line:
             if 'equation' in line or 'align' in line:
                 self._context.append('equation')
@@ -64,10 +206,10 @@ class TeXFormatter:
         if '\\end' in line:
             self._context.pop()
 
-    def reset_context(self):
+    def reset_context(self) -> None:
         self._context = ['text']
 
-    def _format_spaces(self, lines):
+    def _format_spaces(self, lines: list[str]) -> list[str]:
         for i, line in enumerate(lines):
             # Replate all tabs by spaces
             line = line.expandtabs(4)
@@ -77,7 +219,11 @@ class TeXFormatter:
                 # Emacs local variable definition.
                 indent = 0
                 cmt = '%%% '
+            elif set(line.strip()) == {'%'}:
+                # Line contains only comment. Keep it as is
+                continue
             elif line.lstrip().startswith('%'):
+                # Line is a comment
                 indent = (len(line[1:]) - len(line.lstrip(' %'))) // 4 * 4
                 cmt = '%'
             else:
@@ -88,12 +234,12 @@ class TeXFormatter:
             # Remove double spaces (except for the indent)
             while '  ' in line[indent:]:
                 line = self.indent + line.lstrip(' %').replace('  ', ' ')
-            # Make sure all the commas are followed by a space.
-            line = line.replace(', ', ',').replace(',', ', ')
+            # Make sure all the commas are followed by a space, except for ,~
+            line = re.sub(r',(?!\s|~)', r', ', line)
             if r'\begin' in line.strip(' %')[6:]:
                 idx = line.index(r'\begin')
-                if not((match := re.search(r'(?<!\\)%', line))
-                       and match.start() < idx):
+                if not ((match := re.search(r'(?<!\\)%', line))
+                        and match.start() < idx):
                     new_line = self.indent + line[idx:]
                     line = line[:idx]
                     lines.insert(i+1, new_line)
@@ -111,7 +257,7 @@ class TeXFormatter:
         self.reset_context()
         return lines
 
-    def _equation_addspace(self, line, offset=0):
+    def _equation_addspace(self, line: str, offset: int = 0) -> list[int]:
         # Find position that need space
         add_space = []
         self.indent = ' ' * (len(line) - len(line.lstrip(' %')))
@@ -158,10 +304,10 @@ class TeXFormatter:
                                                          start+1))
                     continue
             add_space.extend(self._equation_addspace(line[start+1:end],
-                                                          start+1))
+                                                     start+1))
         return [offset + n for n in add_space]
 
-    def _text_addspace(self, line, offset=0):
+    def _text_addspace(self, line: str, offset: int = 0) -> list[int]:
         add_space = []
         list_parenthesis = [
             self._find_parenthesis(line, self.multline_parenthesis)
@@ -177,7 +323,8 @@ class TeXFormatter:
                 )
         return [offset + n for n in add_space]
 
-    def _format_spaces_operation(self, line, offset=0):
+    def _format_spaces_operation(self, line: str, offset: int = 0
+                                 ) -> list[int]:
         add_space = []
         # Add a space before an operation, unless preceeded
         # by a parenthesis or exponent (^)
@@ -193,7 +340,9 @@ class TeXFormatter:
             add_space.append(offset + match.end())
         return add_space
 
-    def format_tex(self, lines, first=False):
+    def format_tex(self, lines: Iterable[str], first: bool = False
+                   ) -> list[str]:
+        # TODO: Fix split parenthesis from multiple lines
         new_content = []
         for line in map(str.rstrip, lines):
             # print(line)
@@ -202,12 +351,15 @@ class TeXFormatter:
             # Compute the indent of the line
             self.indent = ' ' * (len(line) - len(line.lstrip()))
             self.commentafter = len(line)
+            # Manage block separators
+            if set(line.strip()) == {'%'}:
+                new_content.append(line[:79] + '\n')
+                continue
+            # TODO: Compute indent from scratch from previous lines.
             if line.strip().startswith('%'):
                 level = len(line) - len(line.lstrip(' %'))
                 self.indent = '%' + ' ' * (level - 1)
             elif (match := re.search(r'(?<!\\)%(?!$)', line)):
-                # TODO: Go to line splittings and add a comment if the split
-                # occurs after commentafter.
                 self.commentafter = match.start()
             # If line is shoft enough, leave it as it is
             if len(line) <= 80:
@@ -239,7 +391,7 @@ class TeXFormatter:
             new_content = self.combine_lines(new_content)
         return new_content
 
-    def combine_lines(self, content):
+    def combine_lines(self, content: list[str]) -> list[str]:
         index_mask = [True,] * (len(content) - 1)
         while len(content) > 1:
             lengths = np.asarray(list(map(len, content)))
@@ -270,16 +422,19 @@ class TeXFormatter:
             if (second.lstrip(' %')[0] in {'.', ','}
                     or first.strip()[-1] == '%' and first.strip()[-2] != '\\'):
                 space = ''
-            first = re.search(r'^(.*?)(\s|(?<!\\)%)*$', first).group(1)
+            match = re.search(r'^(.*?)(\s|(?<!\\)%)*$', first)
+            if match is None:
+                raise ValueError()
+            first = match.group(1)
             content[idx] = first + space + second.lstrip(' %')
             index_mask.pop(idx)
         return content
 
-    def allow_combine(self, _first, _second):
-        if re.search(r'(?:\w{3,}|\W)\.$', _first.strip(' %')):
+    def allow_combine(self, first: str, second: str) -> bool:
+        if re.search(r'(?:\w{3,}|\W)\.$', first.strip(' %')):
             return False
-        first = _first.strip()
-        second = _second.strip()
+        first = first.strip()
+        second = second.strip()
         if (first[0]=='%') ^ (second[0]=='%'):
             return False
         first = first.strip(' %')
@@ -292,23 +447,24 @@ class TeXFormatter:
             return False
         if pattern_arrow.match(second) or pattern_arrow.match(first):
             return False
-        first = first.endswith
-        second = second.startswith
-        if second('+') or second('-'):
+        _first = first.endswith
+        _second = second.startswith
+        if _second('+') or _second('-'):
             return False
-        if first('(') or first('[') or first('{'):
+        if _first('(') or _first('[') or _first('{'):
             return False
-        if second(')') or second(']') or second('}'):
+        if _second(')') or _second(']') or _second('}'):
             return False
-        if first('\\left(') or first('\\left[') or first('\\left\\{'):
+        if _first('\\left(') or _first('\\left[') or _first('\\left\\{'):
             return False
-        if second('\\right)') or second('\\right]') or second('\\right\\}'):
+        if _second('\\right)') or _second('\\right]') or _second('\\right\\}'):
             return False
         # if _first.strip()[-1] == '%' and _first.strip()[-2] != '\\':
         #     return True
         return True
 
-    def line_split(self, line, pattern, keep=False):
+    def line_split(self, line: str, pattern: Union[str, re.Pattern],
+                   keep: Union[bool, str] = False) -> list[str]:
         if not isinstance(pattern, re.Pattern):
             pattern = re.compile(pattern)
         skeleton, _,  = self.get_skeleton(line, self.multline_parenthesis)
@@ -341,7 +497,7 @@ class TeXFormatter:
                         lines)
         return self.format_tex(new_lines)
 
-    def get_index_line(self, idx, line):
+    def get_index_line(self, idx: int, line: str) -> int:
         idx_l = len(self.indent) + idx
         parenthesis = self._find_parenthesis(line, self.multline_parenthesis)
         for (start, end), _ in parenthesis:
@@ -353,7 +509,7 @@ class TeXFormatter:
             idx_l += end - start - 1
         return idx_l
 
-    def _format_text(self, line):
+    def _format_text(self, line: str) -> list[str]:
         skeleton, parenthesis = self.get_skeleton(line,
                                                   self.multline_parenthesis)
         if self.commentafter < len(line):
@@ -411,7 +567,7 @@ class TeXFormatter:
             return self.line_split(line, ' ', keep=False)
         return [line]
 
-    def _format_equation(self, line):
+    def _format_equation(self, line: str) -> list[str]:
         skeleton, _ = self.get_skeleton(line, self.multline_parenthesis)
         # If equation separator (quad) or equality is present, split line.
         if pattern_separate.search(skeleton):
@@ -444,13 +600,13 @@ class TeXFormatter:
             return ret
         raise NotImplementedError(f'line "{line}" not splitted.')
 
-    def split_sums(self, line):
+    def split_sums(self, line: str) -> Optional[list[str]]:
         skeleton, _ = self.get_skeleton(line, self.multline_parenthesis)
         new_lines = []
         prev_idx = 0
         # TODO: Handle cases like \cong - 3, etc.
         # This should be done easier with new python 3.11 re functions.
-        for match in re.finditer(r'[^=\s]\s*(\+|\-)', skeleton.strip(' &')):
+        for match in re.finditer(r'[^=\s&]\s*(\+|\-)', skeleton):
             idx_s = match.start(1)
             idx_l = self.get_index_line(idx_s, line)
             new_lines.append(self.indent + line[prev_idx:idx_l].lstrip(' %'))
@@ -459,7 +615,7 @@ class TeXFormatter:
             new_lines.append(self.indent + line[idx_l:].lstrip())
             return self.format_tex(new_lines)
 
-    def check_unmatched_parenthesis(self, line):
+    def check_unmatched_parenthesis(self, line: str) -> Optional[list[str]]:
         parenthesis = self._find_parenthesis(line, self.multline_parenthesis)
         for (start, end), _ in parenthesis:
             if start is None and end > len(self.indent):
@@ -472,7 +628,7 @@ class TeXFormatter:
                     self.indent + 4*' ' + line[:end].strip() + '\n',
                     self.indent + line[end:].rstrip() + '\n'
                 ]
-            elif end is None and start + 1 < len(line.rstrip()):
+            elif end is None and start + 2 < len(line.rstrip()):
                 new_lines = [
                     line[:start+1].rstrip() + '\n',
                     self.indent + 4*' ' + line[start+1:].strip() + '\n'
@@ -481,11 +637,21 @@ class TeXFormatter:
                 continue
             return self.format_tex(new_lines)
 
-    def split_large_parenthesis(self, line):
+    def split_large_parenthesis(self, line: str) -> Optional[list[str]]:
         parenthesis = self._find_parenthesis(line, self.multline_parenthesis)
         for (start, end), _ in parenthesis:
             if end is None or start is None or end - start < 30:
                 continue
+            if pattern_context.search(line[:start]):
+                indent = self.indent
+                new_lines = [line[:start + 1] + '%\n']
+                self._context.append('text')
+                new_lines += self.format_tex(
+                    [self.indent + 4*' ' + line[start+1:end].lstrip() + '%\n']
+                )
+                self._context.pop()
+                new_lines += [indent + line[end:] + '\n']
+                return self.format_tex(new_lines)
             if (match := re.search(r'\\(right|[bB]igg?)\s?\\?$', line[:end])):
                 end = match.start()
             new_lines = [
@@ -506,7 +672,7 @@ class TeXFormatter:
                          self.indent + line[end+1:].strip() + '\n']
             return self.format_tex(new_lines)
 
-    def update_multiline_parenthesis(self, line):
+    def update_multiline_parenthesis(self, line: str) -> None:
         if 'phantom' in line:
             return
         open_p = '([{'
@@ -540,109 +706,30 @@ class TeXFormatter:
 
     @classmethod
     @functools.cache
-    def get_skeleton(cls, line, unmatched_parenthesis=''):
+    def get_skeleton(cls, line: str, unmatched_parenthesis: str = ''
+                     ) -> tuple[str, ParenthesisType]:
         parenthesis = cls._find_parenthesis(line, unmatched_parenthesis)
         skeleton = line.lstrip(' %')
         offset = len(line) - len(skeleton)
         for (start, end), _ in parenthesis:
-            try:
+            if end is None:
+                skeleton = skeleton[:start-offset+1]
+                break
+            elif start is None:
+                skeleton = skeleton[end-offset:]
+                offset = end
+            else:
                 skeleton = skeleton[:start-offset+1] + skeleton[end-offset:]
                 offset += end - start - 1
-            except TypeError:
-                if start:
-                    skeleton = skeleton[:start-offset+1]
-                    break
-                elif end:
-                    skeleton = skeleton[end-offset:]
-                    offset = end
         return skeleton.strip(' %'), parenthesis
 
     @staticmethod
     @functools.cache
-    def _find_parenthesis(line, unmatched_parenthesis=''):
-        open_p = '([{$'
-        close_p = ')]}'
-        parenthesis_structure = {}
-        current_struct = parenthesis_structure
-        levels = []
-        for idx, char in enumerate(line):
-            if char in open_p:
-                if char == '$':
-                    if idx > 0 and line[idx-1] == '\\':
-                        continue
-                    open_p = open_p.replace('$', '')
-                    close_p = close_p + '$'
-                key = (idx, char)
-                levels.append(key)
-                current_struct[key] = {}
-                current_struct = current_struct[key]
-            elif char in close_p:
-                if levels:
-                    start, schar = levels.pop()
-                    if schar == '$':
-                        if char != '$':
-                            raise ValueError(
-                                f'Parenthesis not well written: {line}'
-                            )
-                        elif line[idx-1] == '\\':
-                            levels.append((start, schar))
-                            continue
-                        open_p = open_p + '$'
-                        close_p = close_p.replace('$', '')
-                    elif open_p.index(schar) != close_p.index(char):
-                        fail = True
-                        if char == ')':
-                            # Assume that ) is not part of a parenthesis
-                            levels.append((start, schar))
-                            continue
-                        if char == '}':
-                            # Check its not a phantom context
-                            while levels:
-                                start, schar = levels.pop()
-                                if schar != '{':
-                                    continue
-                                if not re.search(r'\\phantom$', line[:start]):
-                                    continue
-                                fail = False
-                                break
-                        if fail:
-                            raise Exception(
-                                f'Parenthesis not well written: {line}'
-                            )
-                else:
-                    if unmatched_parenthesis:
-                        schar = unmatched_parenthesis[-1]
-                        if open_p.index(schar) != close_p.index(char):
-                            if char == ')':
-                                continue
-                            raise Exception(
-                                f'Parenthesis not well written: {line}'
-                            )
-                        unmatched_parenthesis = unmatched_parenthesis[:-1]
-                    elif char == ')':
-                        continue
-                    parenthesis_structure = {
-                        ((None, idx), char): parenthesis_structure
-                    }
-                    current_struct = parenthesis_structure
-                    continue
-                parent_structure = parenthesis_structure
-                for level in levels:
-                    parent_structure = parent_structure[level]
-                parent_structure.pop((start, schar))
-                parent_structure[((start, idx), schar)] = current_struct
-                current_struct = parent_structure
-        while levels:
-            start, schar = levels.pop()
-            parent_structure = parenthesis_structure
-            for level in levels:
-                parent_structure = parent_structure[level]
-            parent_structure.pop((start, schar))
-            parent_structure[((start, None), schar)] = current_struct
-            current_struct = parent_structure
-        return parenthesis_structure
+    def _find_parenthesis(line: str, unmatched_parenthesis: str = ''
+                          ) -> ParenthesisType:
+        return Parenthesis().parse(line, unmatched_parenthesis)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         if self.formatted_lines == self.init_string:
             return 'String not modified'
         return ''.join(self.formatted_lines)
@@ -652,27 +739,33 @@ class TeXFormatter:
             return repr(self) == other
         return NotImplemented
 
-s = r'''
-\begin{equation*}
-    L_{1}
-    = \frac{2 \alpha_{S}^{2}}{b_{0} \pi^2} \left\{
-        \pi b_{0}^{2} \left(- C_{i} \log(\frac{Q^{2}}{\mu^{2}_{F}})^{2} H^{(0)} S^{(0)} + 2 C_{i} \log(\frac{Q^{2}}{\mu^{2}_{F}}) \log(\frac{Q^{2}}{\mu^{2}_{R}}) H^{(0)} S^{(0)} - 4 \gamma_{E} C_{i} \log(\frac{Q^{2}}{\mu^{2}_{R}}) H^{(0)} S^{(0)} + 4 C_{i} \zeta_{2} H^{(0)} S^{(0)} + 4 \gamma_{E}^{2} C_{i} H^{(0)} S^{(0)} + \log(\frac{Q^{2}}{\mu^{2}_{R}}) H^{(0)} S^{(0)} \Gamma^{(1)} + \log(\frac{Q^{2}}{\mu^{2}_{R}}) H^{(0)} \overline{\Gamma^{(1)}} S^{(0)} + 2 H^{(0)} S^{(0)} K - 2 \gamma_{E} H^{(0)} S^{(0)} \Gamma^{(1)} + 2 H^{(0)} S^{(1)} + 2 H^{(0)} \overline{K} S^{(0)} - 2 \gamma_{E} H^{(0)} \overline{\Gamma^{(1)}} S^{(0)}\right) + b_{0} \left(- 2 A^{(2)} C_{i} \log(\frac{Q^{2}}{\mu^{2}_{F}}) H^{(0)} S^{(0)} + 4 \gamma_{E} A^{(2)} C_{i} H^{(0)} S^{(0)} - C_{i} D^{(2)} H^{(0)} S^{(0)} - 2 C_{i} \log(\frac{Q^{2}}{\mu^{2}_{F}}) H^{(0)} S^{(1)} - 2 C_{i} \log(\frac{Q^{2}}{\mu^{2}_{F}}) H^{(1)} S^{(0)} + 4 \gamma_{E} C_{i} H^{(0)} S^{(1)} + 4 \gamma_{E} C_{i} H^{(1)} S^{(0)} - H^{(0)} S^{(0)} K \Gamma^{(1)} + H^{(0)} S^{(0)} \Gamma^{(1)} K - H^{(0)} S^{(1)} \Gamma^{(1)} + H^{(0)} \overline{K} \overline{\Gamma^{(1)}} S^{(0)} - H^{(0)} \overline{\Gamma^{(1)}} S^{(1)} - H^{(0)} \overline{\Gamma^{(1)}} \overline{K} S^{(0)} - H^{(1)} S^{(0)} \Gamma^{(1)} - H^{(1)} \overline{\Gamma^{(1)}} S^{(0)}\right) - \pi b_{1} \left(H^{(0)} S^{(0)} \Gamma^{(1)} + H^{(0)} \overline{\Gamma^{(1)}} S^{(0)}\right)
-    \right\}
-\end{equation*}
-'''
-r = TeXFormatter(s)
-print(r)
 
-# if __name__ == '__main__':
-#     pathdir = pathlib.Path.cwd()
-#     filename = pathdir / pathlib.Path(sys.argv[1])
-#     print(filename)
-#     dest = pathdir / pathlib.Path(sys.argv[1])
-#     with filename.open() as file:
-#         content = file.readlines()
-#     new_content = TeXFormatter(content).formatted_lines
-#     with dest.open('w') as file:
-#         file.writelines(new_content)
+def run_from_command() -> None:
+    pathdir = pathlib.Path.cwd()
+    filename = pathdir / pathlib.Path(sys.argv[1])
+    print(filename)
+    dest = pathdir / pathlib.Path(sys.argv[1])
+    with filename.open() as file:
+        content = file.readlines()
+    new_content = TeXFormatter(content).formatted_lines
+    with dest.open('w') as file:
+        file.writelines(new_content)
+
+
+def run_from_editor() -> None:
+    s = r'''
+\newcommand{\pnote}[1]{ \textbf{[DP:} \textit{\color{red} #1}\textbf{]}}
+'''
+    r = TeXFormatter(s)
+    print(r)
+
+
+if __name__ == '__main__':
+    try:
+        __IPYTHON__
+        run_from_editor()
+    except NameError:
+        run_from_command()
 
 ### TESTS ###
 
@@ -689,6 +782,22 @@ s = r'''
 \end{equation*}
 '''
 assert TeXFormatter(s) == '\n\\begin{equation*}\n    -b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu_0^2})\n    = \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0} \\log(\n        \\frac{\n            \\frac{\\alpha_S(\\mu_0^2)}{\\alpha_S(\\mu^2)}\n            + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0}\n        }{1 + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0}}\n    )\n    + 1\n    - \\frac{\\alpha_S(\\mu_0^2)}{\\alpha_S(\\mu^2)}\n    + \\order{\\alpha_S^2}\n\\end{equation*}\n'
+
+#17
+s = r'''
+%%%%%%%%%%%%%%%%%%%%%%%%%
+ \begin{figure}
+     \centering
+\includegraphics[width=.49\textwidth]{tth_nnll_comp_qcd_scet.pdf}
+\includegraphics[width=.49\textwidth]{tth_nnllnnlo_lhc136_asym.pdf}
+     \caption{Left: comparison between NNLO+NNLL results in  dQCD and SCET for three parametrically different choices of the default
+     scales.  Right: comparison of the combined NNLO+NNLL results with NNLO, for the same three sets of scales. No EW corrections are included. See the text for
+     additional explanations on the estimation of the uncertainties. }
+     \label{fig:tth_comparisons}
+ \end{figure}
+%%%%%%%%%%%%%%%%%%%%%%%%%%
+'''
+assert TeXFormatter(s) == '\n%%%%%%%%%%%%%%%%%%%%%%%%%\n\\begin{figure}\n    \\centering\n\\includegraphics[width=.49\\textwidth]{tth_nnll_comp_qcd_scet.pdf}\n\\includegraphics[width=.49\\textwidth]{tth_nnllnnlo_lhc136_asym.pdf}\n    \\caption{%\n        Left: comparison between NNLO+NNLL results in dQCD and\n        SCET for three parametrically different choices of the default%\n    scales.\n    Right: comparison of the combined NNLO+NNLL results with NNLO,\n    for the same three sets of scales.\n    No EW corrections are included.\n    See the text for\n    additional explanations on the estimation of the uncertainties. }\n    \\label{fig:tth_comparisons}\n\\end{figure}\n%%%%%%%%%%%%%%%%%%%%%%%%%%\n'
 
 # 22
 s = r'''
@@ -712,6 +821,47 @@ which we can now solve iteratively by substituting the formula onto itself (and 
 Putting everything together in equation \eqref{eq:Kmatrix} we have
 '''
 assert TeXFormatter(s) == '\nwhich we can now solve iteratively by substituting\nthe formula onto itself (and neglecting $\\order{\\alpha_S^2}$ terms).\nNote that $\\mu \\ll \\mu_0$,\nso in general $\\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu^2_0})$\nis not necessarily a small quantity and thus we cannot neglect those terms\n\\begin{align*}\n    \\frac{\\alpha_S(\\mu_0^2)}{\\alpha_S(\\mu^2)} &\n    = 1\n    + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu_0^2})\n    + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0} \\log(\n        1 + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu^2_0}) + \\order{\\alpha_S}\n    )\n    + \\order{\\alpha_S^2} \\\\&\n    = 1\n    + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu_0^2})\n    + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0} \\log(\n        1 + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu^2_0})\n    )\n    + \\order{\\alpha_S^2}\n\\end{align*}\nPutting everything together in equation \\eqref{eq:Kmatrix} we have\n'
+
+# 25
+s = r'''
+We have checked analytically that with this choice of scales in the SCET expressions, they agree with the dQCD expressions up to the higher order logarithmic terms in dQCD, as explained below. These terms originate from various sources. To start with, in SCET any ratio of scales of the form $\ln \mu_i/\mu_j$ is counted as large, where $\mu_i \in \{\muF,\muR,\mu_s,\mu_h\}$. This implies, for instance, that in the SCET formulas in the Mellin-space which are used here corrections logarithmic in $ \bar N = N e^{\gamma_E}$ are resummed. Instead, the particular formulation of the dQCD expressions presented insection~\ref{sec:theo-nnllk}, resums $\ln N$ terms, with additional terms involving $\gamma_E$ included up to the NNLL accuracy. Another difference stems from the treatment of the  $\exp (\alphas g_3)$ term: while in dQCD it is fully included, in SCET its expansion up to $\O (\alphas)$ is considered. Although technically this term is of the NNLL accuracy, we have checked that the numerical impact of the difference in its implementation is negligible.
+Moreover, the set of non-logarithmic (in $N$ or $\bar N$) terms collected in the perturbative hard and soft functions in Eqs.~\ref{b:kernelmellin},~\ref{eq:res:fact:dqcd} begin to differ at $\O (\alphas^2)$, what corresponds to differences of order N$^3$LL and higher.
+'''
+assert TeXFormatter(s) == '\nWe have checked analytically that with this\nchoice of scales in the SCET expressions,\nthey agree with the dQCD expressions up to the\nhigher order logarithmic terms in dQCD, as explained below.\nThese terms originate from various sources.\nTo start with,\nin SCET any ratio of scales of the form $\\ln \\mu_i / \\mu_j$ is counted as large,\nwhere $\\mu_i \\in \\{\\muF, \\muR, \\mu_s, \\mu_h\\}$.\nThis implies, for instance, that in the SCET formulas in the Mellin-space which\nare used here corrections logarithmic in\n$ \\bar N = N e^{\\gamma_E}$ are resummed.\nInstead, the particular formulation of the dQCD\nexpressions presented insection~\\ref{sec:theo-nnllk}, resums $\\ln N$ terms,\nwith additional terms involving $\\gamma_E$ included up to the NNLL accuracy.\nAnother difference stems from the treatment of the $\\exp (\\alphas g_3)$ term:\nwhile in dQCD it is fully included,\nin SCET its expansion up to $\\O (\\alphas)$ is considered.\nAlthough technically this term is of the NNLL accuracy,\nwe have checked that the numerical\nimpact of the difference in its implementation is negligible.\nMoreover, the set of non-logarithmic (in $N$ or $\\bar N$) terms collected\nin the perturbative hard and soft functions in Eqs.~\\ref{b:kernelmellin},%\n~\\ref{eq:res:fact:dqcd} begin to differ at $\\O (\\alphas^2)$,\nwhat corresponds to differences of order N$^3$LL and higher.\n'
+
+# 34
+s = r'''
+\begin{align*}
+    S^{(1)}&
+    = S^{(0)}\left(\red{\frac{1}{2}}\sum C^{ij}S^{ij} + (C_1 + C_2)S^{12}\right)\\&
+    = S^{(0)}\left(
+        2C^{12}S^{12}
+        + 2C^{13}S^{13}
+        + 2C^{14}S^{14}
+        + 2C^{23}S^{23}
+        + 2C^{24}S^{24}
+        + C^{33}S^{33}
+        + 2C^{34}S^{34}
+        + C^{44}S^{44}
+        + (C_1+C_2)S^{12}
+    \right)\\&
+    = S^{(0)}\bigg(
+        C^{34}\left(2S^{34}-S^{33}-S^{44}\right)
+        + C^{13}\left(2S^{13}-2S^{14}-S^{33}+S^{44}\right)
+        \\&\phantom{= S^{(0)}\bigg(}
+        + C^{23}\left(2S^{23}-2S^{24}-S^{33}+S^{44}\right)
+        + N_cC_8\left(-S^{14}-S^{24}+S^{44}\right)
+        + (2C^{12}+C_1+C_2)S^{12}
+    \bigg)\\&
+    = S^{(0)}\bigg(
+        C^{34}\left(2S^{34}-S^{33}-S^{44}\right)
+        + 2C^{13}\left(S^{13}-S^{14}-S^{23}+S^{24}\right)
+        \\&\phantom{= S^{(0)}\bigg(}
+        + \frac{N_c}{2}C_8\left(2S^{12}-2S^{14}-2S^{23}+S^{33}+S^{44}\right)
+    \bigg)
+\end{align*}
+'''
+assert TeXFormatter(s) == '\n\\begin{align*}\n    S^{(1)} &\n    = S^{(0)} \\left(\n        \\red{\\frac{1}{2}} \\sum C^{ij} S^{ij} + (C_1 + C_2) S^{12}\n    \\right) \\\\&\n    = S^{(0)} \\left(\n        2 C^{12} S^{12}\n        + 2 C^{13} S^{13}\n        + 2 C^{14} S^{14}\n        + 2 C^{23} S^{23}\n        + 2 C^{24} S^{24}\n        + C^{33} S^{33}\n        + 2 C^{34} S^{34}\n        + C^{44} S^{44}\n        + (C_1 + C_2) S^{12}\n    \\right) \\\\&\n    = S^{(0)} \\bigg(\n        C^{34} \\left(2 S^{34} - S^{33} - S^{44}\\right)\n        + C^{13} \\left(2 S^{13} - 2 S^{14} - S^{33} + S^{44}\\right)\n        \\\\& \\phantom{= S^{(0)} \\bigg(}\n        + C^{23} \\left(2 S^{23} - 2 S^{24} - S^{33} + S^{44}\\right)\n        + N_c C_8 \\left(-S^{14} - S^{24} + S^{44}\\right)\n        + (2 C^{12} + C_1 + C_2) S^{12}\n    \\bigg) \\\\&\n    = S^{(0)} \\bigg(\n        C^{34} \\left(2 S^{34} - S^{33} - S^{44}\\right)\n        + 2 C^{13} \\left(S^{13} - S^{14} - S^{23} + S^{24}\\right)\n        \\\\& \\phantom{= S^{(0)} \\bigg(}\n        + \\frac{N_c}{2} C_8 \\left(\n            2 S^{12} - 2 S^{14} - 2 S^{23} + S^{33} + S^{44}\n        \\right)\n    \\bigg)\n\\end{align*}\n'
 
 # 49
 s = r'''
@@ -769,39 +919,6 @@ s = r'''
 \end{align*}
 '''
 assert TeXFormatter(s) == '\n\\begin{align*}\n    \\tilde{g}_S \\left(\\frac{Q}{\\bar{N}}, \\mu_R\\right) &\n    = \\frac{1}{2 \\pi b_0} \\left[\n        \\log(\n            1\n            - 2 \\lambda\n            + b_0 \\alpha_S(\\mu_R^2) \\left(\n                \\log(\\frac{Q^2}{\\mu_R^2}) - 2 \\gamma_E\n            \\right)\n        )\n        + \\alpha_S(\\mu_R^2) \\frac{b_1}{b_0}\n        \\frac{\\log(1 - 2 \\lambda)}{1 - 2 \\lambda}\n    \\right]\n    + \\order{\\alpha_S^2} \\\\&\n    = \\frac{1}{2 \\pi b_0} \\left[\n        \\log(1 - 2 \\lambda)\n        + \\frac{b_0 \\alpha_S(\\mu_R^2)}{1 - 2 \\lambda} \\left(\n            \\log(\\frac{Q^2}{\\mu_R^2}) - 2 \\gamma_E\n        \\right)\n        + \\alpha_S(\\mu_R^2) \\frac{b_1}{b_0}\n        \\frac{\\log(1 - 2 \\lambda)}{1 - 2 \\lambda}\n    \\right]\n    + \\order{\\alpha_S^2}\n\\end{align*}\n'
-
-s = r'''
-\begin{align*}
-    S^{(1)}&
-    = S^{(0)}\left(\red{\frac{1}{2}}\sum C^{ij}S^{ij} + (C_1 + C_2)S^{12}\right)\\&
-    = S^{(0)}\left(
-        2C^{12}S^{12}
-        + 2C^{13}S^{13}
-        + 2C^{14}S^{14}
-        + 2C^{23}S^{23}
-        + 2C^{24}S^{24}
-        + C^{33}S^{33}
-        + 2C^{34}S^{34}
-        + C^{44}S^{44}
-        + (C_1+C_2)S^{12}
-    \right)\\&
-    = S^{(0)}\bigg(
-        C^{34}\left(2S^{34}-S^{33}-S^{44}\right)
-        + C^{13}\left(2S^{13}-2S^{14}-S^{33}+S^{44}\right)
-        \\&\phantom{= S^{(0)}\bigg(}
-        + C^{23}\left(2S^{23}-2S^{24}-S^{33}+S^{44}\right)
-        + N_cC_8\left(-S^{14}-S^{24}+S^{44}\right)
-        + (2C^{12}+C_1+C_2)S^{12}
-    \bigg)\\&
-    = S^{(0)}\bigg(
-        C^{34}\left(2S^{34}-S^{33}-S^{44}\right)
-        + 2C^{13}\left(S^{13}-S^{14}-S^{23}+S^{24}\right)
-        \\&\phantom{= S^{(0)}\bigg(}
-        + \frac{N_c}{2}C_8\left(2S^{12}-2S^{14}-2S^{23}+S^{33}+S^{44}\right)
-    \bigg)
-\end{align*}
-'''
-assert TeXFormatter(s) == '\n\\begin{align*}\n    S^{(1)} &\n    = S^{(0)} \\left(\n        \\red{\\frac{1}{2}} \\sum C^{ij} S^{ij} + (C_1 + C_2) S^{12}\n    \\right) \\\\&\n    = S^{(0)} \\left(\n        2 C^{12} S^{12}\n        + 2 C^{13} S^{13}\n        + 2 C^{14} S^{14}\n        + 2 C^{23} S^{23}\n        + 2 C^{24} S^{24}\n        + C^{33} S^{33}\n        + 2 C^{34} S^{34}\n        + C^{44} S^{44}\n        + (C_1 + C_2) S^{12}\n    \\right) \\\\&\n    = S^{(0)} \\bigg(\n        C^{34} \\left(2 S^{34} - S^{33} - S^{44}\\right)\n        + C^{13} \\left(2 S^{13} - 2 S^{14} - S^{33} + S^{44}\\right)\n        \\\\& \\phantom{= S^{(0)} \\bigg(}\n        + C^{23} \\left(2 S^{23} - 2 S^{24} - S^{33} + S^{44}\\right)\n        + N_c C_8 \\left(-S^{14} - S^{24} + S^{44}\\right)\n        + (2 C^{12} + C_1 + C_2) S^{12}\n    \\bigg) \\\\&\n    = S^{(0)} \\bigg(\n        C^{34} \\left(2 S^{34} - S^{33} - S^{44}\\right)\n        + 2 C^{13} \\left(S^{13} - S^{14} - S^{23} + S^{24}\\right)\n        \\\\& \\phantom{= S^{(0)} \\bigg(}\n        + \\frac{N_c}{2} C_8 \\left(\n            2 S^{12} - 2 S^{14} - 2 S^{23} + S^{33} + S^{44}\n        \\right)\n    \\bigg)\n\\end{align*}\n'
 
 s = r'''
 \begin{equation*}
