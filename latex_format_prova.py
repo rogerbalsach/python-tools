@@ -35,7 +35,10 @@ pattern_context = re.compile(rf'({"|".join(context_list)})$')
 
 ParenthesisType = dict[
     tuple[
-        Union[tuple[int, Optional[int]], tuple[Optional[int], int]],
+        Union[
+            tuple[Optional[int], int],
+            tuple[int, Optional[int]]
+        ],
         str
     ],
     'ParenthesisType'
@@ -73,9 +76,9 @@ class Parenthesis():
                 f'Parenthesis mismatch in line: {self.line}'
             )
         elif self.is_escaped(idx):
-            return True
+            return False
         self.in_equation = False
-        return False
+        return True
 
     def process_not_match(self, idx: int, char: str, start: int
                           ) -> tuple[int, str]:
@@ -107,7 +110,6 @@ class Parenthesis():
                 f'Expected: {self.get_match(schar)}, '
                 f'Found: {char}'
             )
-        unmatched_parenthesis = unmatched_parenthesis[:-1]
         return False
 
     def parse(self, line: str, unmatched_parenthesis: str) -> ParenthesisType:
@@ -131,8 +133,8 @@ class Parenthesis():
                 if self.levels:
                     start, schar = self.levels.pop()
                     if schar == '$':
-                        escaped = self.process_end_equation(char, idx, start)
-                        if escaped:
+                        valid = self.process_end_equation(char, idx, start)
+                        if not valid:
                             self.levels.append((start, '$'))
                             continue
                     elif not self.match(char, schar):
@@ -149,10 +151,15 @@ class Parenthesis():
                                                          char)
                         if escaped:
                             continue
+                        unmatched_parenthesis = unmatched_parenthesis[:-1]
                     elif char == ')':
                         continue
+                    elif char == '}':
+                        if self.is_escaped(idx):
+                            idx -= 1
+                    schar = self.get_match(char)
                     self.parenthesis_structure = {
-                        ((None, idx), char): self.parenthesis_structure
+                        ((None, idx), schar): self.parenthesis_structure
                     }
                     self.current_struct = self.parenthesis_structure
                     continue
@@ -169,8 +176,8 @@ class Parenthesis():
     def update_structure(self, start: int, schar: str, idx: Optional[int]
                          ) -> ParenthesisType:
         parent_structure = self.parenthesis_structure
-        for idx, char in self.levels:
-            parent_structure = parent_structure[(idx, None), char]
+        for _idx, char in self.levels:
+            parent_structure = parent_structure[(_idx, None), char]
         parent_structure.pop(((start, None), schar))
         parent_structure[((start, idx), schar)] = self.current_struct
         return parent_structure
@@ -195,7 +202,7 @@ class TeXFormatter:
 
     def update_context(self, line: str) -> None:
         if '\\begin' in line:
-            if 'equation' in line or 'align' in line:
+            if 'equation' in line or 'align' in line or 'eqnarray' in line:
                 self._context.append('equation')
             elif 'document' in line or 'figure' in line:
                 self._context.append('text')
@@ -203,7 +210,11 @@ class TeXFormatter:
                 from warnings import warn
                 warn(f'unknown environment: {line}')
                 self._context.append(self._context[-1])
+        elif r'beq' in line:
+            self._context.append('equation')
         if '\\end' in line:
+            self._context.pop()
+        elif r'\eeq' in line:
             self._context.pop()
 
     def reset_context(self) -> None:
@@ -219,8 +230,8 @@ class TeXFormatter:
                 # Emacs local variable definition.
                 indent = 0
                 cmt = '%%% '
-            elif set(line.strip()) == {'%'}:
-                # Line contains only comment. Keep it as is
+            elif line.lstrip().startswith('%%%%'):
+                # Long comment. Keep it as is
                 continue
             elif line.lstrip().startswith('%'):
                 # Line is a comment
@@ -235,7 +246,8 @@ class TeXFormatter:
             while '  ' in line[indent:]:
                 line = self.indent + line.lstrip(' %').replace('  ', ' ')
             # Make sure all the commas are followed by a space, except for ,~
-            line = re.sub(r',(?!\s|~)', r', ', line)
+            # and footnotes
+            line = re.sub(r',(?!\s|~|\\footnote)', r', ', line)
             if r'\begin' in line.strip(' %')[6:]:
                 idx = line.index(r'\begin')
                 if not ((match := re.search(r'(?<!\\)%', line))
@@ -314,10 +326,11 @@ class TeXFormatter:
         ].copy()
         while list_parenthesis:
             parenthesis = list_parenthesis.pop()
-            for (start, end), char in parenthesis:
+            for ((start, end), char), par in parenthesis.items():
                 if char != '$':
-                    list_parenthesis.append(parenthesis[(start, end), char])
+                    list_parenthesis.append(par)
                     continue
+                assert start is not None
                 add_space.extend(
                     self._equation_addspace(line[start+1:end], offset=start+1)
                 )
@@ -351,7 +364,7 @@ class TeXFormatter:
             # Compute the indent of the line
             self.indent = ' ' * (len(line) - len(line.lstrip()))
             self.commentafter = len(line)
-            # Manage block separators
+            # TODO: Manage block separators of thef form %%%% TEXT %%%%
             if set(line.strip()) == {'%'}:
                 new_content.append(line[:79] + '\n')
                 continue
@@ -435,7 +448,7 @@ class TeXFormatter:
             return False
         first = first.strip()
         second = second.strip()
-        if (first[0]=='%') ^ (second[0]=='%'):
+        if (first[0] == '%') ^ (second[0] == '%'):
             return False
         first = first.strip(' %')
         second = second.strip(' %')
@@ -453,7 +466,7 @@ class TeXFormatter:
             return False
         if _first('(') or _first('[') or _first('{'):
             return False
-        if _second(')') or _second(']') or _second('}'):
+        if _second(')') or _second(']') or _second('}') or _second(r'\}'):
             return False
         if _first('\\left(') or _first('\\left[') or _first('\\left\\{'):
             return False
@@ -467,7 +480,7 @@ class TeXFormatter:
                    keep: Union[bool, str] = False) -> list[str]:
         if not isinstance(pattern, re.Pattern):
             pattern = re.compile(pattern)
-        skeleton, _,  = self.get_skeleton(line, self.multline_parenthesis)
+        skeleton, _ = self.get_skeleton(line, self.multline_parenthesis)
         lines = []
         prev_idx = 0
         for match in pattern.finditer(skeleton):
@@ -502,10 +515,12 @@ class TeXFormatter:
         parenthesis = self._find_parenthesis(line, self.multline_parenthesis)
         for (start, end), _ in parenthesis:
             if start is None:
+                assert end is not None
                 idx_l = end + idx
                 continue
             if start >= idx_l:
                 break
+            assert end is not None, line
             idx_l += end - start - 1
         return idx_l
 
@@ -515,17 +530,17 @@ class TeXFormatter:
         if self.commentafter < len(line):
             new_lines = [line[:self.commentafter], line[self.commentafter:]]
             return self.format_tex(new_lines)
-        # Split phases (separated by . or ?) into multiple lines
-        pattern = re.compile(r'.[\.\?](?=\s[A-Z])')
+        # Split sentences (separated by . or ?) into multiple lines
+        pattern = re.compile(r'.[\.\?](?=\s[A-Z{])')
         if pattern.search(skeleton[:-1]):
             return self.line_split(line, pattern, keep='first')
         # Split the line by ':'
-        elif ':' in skeleton[:-1]:
+        elif re.search(r':\W', skeleton[:-1]):
             return self.line_split(line, ':', keep='first')
         # Split the line by ','
         elif ',' in skeleton[:-1]:
             return self.line_split(line, ',', keep='first')
-        # Split the line by ','
+        # Split the line by ' and '
         elif ' and ' in skeleton[:-1]:
             return self.line_split(line, r'(?<=\s)and(?=\s)', keep='first')
         # Split the formulas into a new line.
@@ -546,18 +561,25 @@ class TeXFormatter:
         if ' $$' in skeleton:
             return self.line_split(line, r'\s\$\$', keep=True)
         # Split {} into multiple lines
-        for (start, end), char in parenthesis:
-            start = start or 0
-            end = end or len(line)
+        for (_start, _end), char in parenthesis:
+            start = _start+1 if _start is not None else 0
+            end = _end if _end is not None else len(line)
             if end - start > 40 and char == '{':
                 pass
             elif end - start > 75 and char == '(':
                 pass
             else:
                 continue
-            new_lines.append(self.indent + line[:start+1].lstrip(' %') + '%')
+            # Decide wether to put comment at the end of the line or not.
+            EOL1 = EOL2 = '%'
+            if (line[start] == ' '
+                    and (char != '{' or start > 2 and line[start-2] != '\\')):
+                EOL1 = ''
+            if _end is None and line.strip()[-1] != '%':
+                EOL2 = ''
+            new_lines.append(self.indent + line[:start].lstrip(' %') + EOL1)
             new_lines.append(
-                self.indent + 4 * ' ' + line[start+1:end].lstrip() + '%'
+                self.indent + 4 * ' ' + line[start:end].lstrip() + EOL2
             )
             new_lines.append(self.indent + line[end:].lstrip())
             new_lines = [line for line in new_lines if line.strip(' %')]
@@ -595,6 +617,7 @@ class TeXFormatter:
             return self.line_split(line, r'(?<!\\)\s')
         # If the parenthesis are not big enough, split the line right
         # after a parenthesis
+        # TODO: There is no test for this line!
         ret = self.split_after_parenthesis(line)
         if ret is not None:
             return ret
@@ -619,7 +642,7 @@ class TeXFormatter:
         parenthesis = self._find_parenthesis(line, self.multline_parenthesis)
         for (start, end), _ in parenthesis:
             if start is None and end > len(self.indent):
-                if (match := re.search(r'\\(right|[bB]igg?)\s?\\?$',
+                if (match := re.search(r'\\((right|[bB]igg?)\s?\\?)?$',
                                        line[:end])):
                     end = match.start()
                     if end == len(self.indent):
@@ -661,7 +684,7 @@ class TeXFormatter:
             ]
             return self.format_tex(new_lines)
 
-    def split_after_parenthesis(self, line):
+    def split_after_parenthesis(self, line: str) -> Optional[list[str]]:
         parenthesis = self._find_parenthesis(line, self.multline_parenthesis)
         for (start, end), char in reversed(parenthesis):
             if end > 80:
@@ -683,7 +706,7 @@ class TeXFormatter:
         while parenthesis:
             ((start, end), char), child = parenthesis.popitem()
             if start is None:
-                new_parenthesis.append((end, char))
+                new_parenthesis.append((end, Parenthesis.get_match(char)))
             elif end is None:
                 new_parenthesis.append((start, char))
             else:
@@ -734,7 +757,7 @@ class TeXFormatter:
             return 'String not modified'
         return ''.join(self.formatted_lines)
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         if isinstance(other, str):
             return repr(self) == other
         return NotImplemented
@@ -754,7 +777,10 @@ def run_from_command() -> None:
 
 def run_from_editor() -> None:
     s = r'''
-\newcommand{\pnote}[1]{ \textbf{[DP:} \textit{\color{red} #1}\textbf{]}}
+where $f_{i / h}(x, \muF^2)$ are moments of the parton
+distribution functions and $ d \hat \si^{\rm
+(res)}_{ij\tosv \tth}/ dQ^2 \left.
+\right|_{\scriptscriptstyle({\rm NNLO})}$ represents the perturbative expansion of the resummed cross section truncated at NNLO. The inverse Mellin transform (\ref{invmel}) is evaluated numerically using according to the ``Minimal Prescription'' ~ \cite{Catani:1996 yz}along a contour ${\sf C}$ in the complex-$N$ space.
 '''
     r = TeXFormatter(s)
     print(r)
@@ -769,11 +795,54 @@ if __name__ == '__main__':
 
 ### TESTS ###
 
+# ?
+s = r'''
+where $f_{i / h}(x, \muF^2)$ are moments of the parton
+distribution functions and $ d \hat \si^{\rm
+(res)}_{ij\tosv \tth}/ dQ^2 \left.
+\right|_{\scriptscriptstyle({\rm NNLO})}$ represents the perturbative expansion of the resummed cross section truncated at NNLO. The inverse Mellin transform (\ref{invmel}) is evaluated numerically using according to the ``Minimal Prescription'' ~ \cite{Catani:1996 yz}along a contour ${\sf C}$ in the complex-$N$ space.
+'''
+assert TeXFormatter(s) == ''
+
+# 5
+s = r'''
+\cite{CMS:2014wdm,CMS:2017odg,ATLAS:2017ztq,CMS:2018fdh,ATLAS:2018mme,ATLAS:2018kot,ATLAS:2018ynr},
+'''
+assert TeXFormatter(s) == '\n\\cite{%\n    CMS:2014wdm, CMS:2017odg, ATLAS:2017ztq, CMS:2018fdh,\n    ATLAS:2018mme, ATLAS:2018kot, ATLAS:2018ynr%\n},\n'
+
+# 6
+s = r'''
+\begin{itemize}
+\item $\muF =\muR = m_t+m_H/2$
+\item $\muF =\muR =H_T/2$
+\item $\muF =\muR   \equiv Q/2$ ($Q\equiv M_{ttH}$)
+\end{itemize}
+'''
+assert TeXFormatter(s) == '\n\\begin{itemize}\n\\item $\\muF = \\muR = m_t + m_H / 2$\n\\item $\\muF = \\muR = H_T / 2$\n\\item $\\muF = \\muR \\equiv Q / 2$ ($Q \\equiv M_{ttH}$)\n\\end{itemize}\n'
+
+# 6
+s = r'''
+\def\cCode#1{\begin{lstlisting}[mathescape,basicstyle=\small
+\ttfamily,frame=leftline,aboveskip=4mm,belowskip=4mm,xleftmargin=20pt,framexleftmargin=10pt,
+numbers=none,framerule=2pt,abovecaptionskip=0.0mm,belowcaptionskip=3.5mm #1]}
+'''
+assert TeXFormatter(s) == '\n\\def\\cCode#1{\n\\begin{lstlisting}[mathescape, basicstyle=\\small\n\\ttfamily, frame=leftline, aboveskip=4mm, belowskip=4mm,\nxleftmargin=20pt, framexleftmargin=10pt,\nnumbers=none, framerule=2pt, abovecaptionskip=0.0mm, belowcaptionskip=3.5mm #1]}\n'
+
 # 6
 s = r'''
 In particular, we are interested in evolving $S$ from the scale where renormalization takes place $\mu_0=\mu_R$ to the soft scale $\mu = Q\bar{N}^{-1}$. Where $\bar{N}=Ne^{\gamma_E}$ as defined in \cite{Kulesza17}. Then
 '''
 assert TeXFormatter(s) == '\nIn particular, we are interested in evolving $S$\nfrom the scale where renormalization takes place\n$\\mu_0 = \\mu_R$ to the soft scale $\\mu = Q \\bar{N}^{-1}$.\nWhere $\\bar{N} = Ne^{\\gamma_E}$ as defined in \\cite{Kulesza17}.\nThen\n'
+
+# 10
+s = r'''
+\begin{align}
+\label{eq:SCET_11}
+	(\mu_F,\mu_R,\mu_h) \in \{&(S,S,S),(2S,S,2S),(2S,S,S),(S/2,S,S/2),(S/2,S,S),(S,2 S,S),\,\nonumber\\
+	& (S,2 S,2 S),(S,S/2,S/2),(S,S/2,S),(2 S,2 S,2 S),(S/2,S/2,S/2)\} \, .
+\end{align}
+'''
+assert TeXFormatter(s) == '\n\\begin{align}\n\\label{eq:SCET_11}\n    (\\mu_F, \\mu_R, \\mu_h) \\in \\{\n        &(S, S, S), (2 S, S, 2 S), (2 S, S, S), (S / 2, S, S / 2),\n        (S / 2, S, S), (S, 2 S, S), \\, \\nonumber \\\\\n        & (S, 2 S, 2 S), (S, S / 2, S / 2),\n        (S, S / 2, S), (2 S, 2 S, 2 S), (S / 2, S / 2, S / 2)\n    \\} \\, .\n\\end{align}\n'
 
 # 13
 s = r'''
@@ -783,7 +852,38 @@ s = r'''
 '''
 assert TeXFormatter(s) == '\n\\begin{equation*}\n    -b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu_0^2})\n    = \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0} \\log(\n        \\frac{\n            \\frac{\\alpha_S(\\mu_0^2)}{\\alpha_S(\\mu^2)}\n            + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0}\n        }{1 + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0}}\n    )\n    + 1\n    - \\frac{\\alpha_S(\\mu_0^2)}{\\alpha_S(\\mu^2)}\n    + \\order{\\alpha_S^2}\n\\end{equation*}\n'
 
-#17
+# 15
+s = r'''
+\begin{eqnarray}
+g_s (N)
+= \frac{1}{2 \pi b_0} \left\{
+    \log(1 - 2 \lambda) + \alphas(\muR^2) \left[
+        \frac{b_1}{b_0} \frac{ \log(1 - 2 \lambda)}{ 1 - 2 \lambda}
+        - 2 \gamma_{\rm E} b_0 \frac{2 \lambda}{1 - 2 \lambda} \right.
+        \right.
+        \nonumber \\
+\left. \left.
+        + \, b_0 \log \left( \frac{Q^2}{\muR^2} \right)
+        \frac{2 \lambda}{1 - 2 \lambda}
+    \right]
+\right\}
+\end{eqnarray}
+'''
+assert TeXFormatter(s) == 'String not modified'
+
+# 17
+s = r'''
+\begin{figure}[ht!]
+    \includegraphics[width=0.49\textwidth]{tth_figxsec.pdf}
+    \includegraphics[width=0.49\textwidth]{tth_figerr.pdf}
+    \caption{\label{fig:xsecerr}{\bf Left panel:} the total cross section for $t\bar t H$, $\sigma_{\rm NNLO+NNLL+EW}$, and the relative impact of the different
+    contributions with respect to $\sigma_{\rm NLO}$. {\bf Right panel:} scale uncertainties computed for the cross section computed at different
+accuracies. Solid lines display the total width of the scale-uncertainty band, while dashed line the maximum variation with respect to the central prediction.}
+\end{figure}
+'''
+assert TeXFormatter(s) == '\n\\begin{figure}[ht!]\n    \\includegraphics[width=0.49\\textwidth]{tth_figxsec.pdf}\n    \\includegraphics[width=0.49\\textwidth]{tth_figerr.pdf}\n    \\caption{%\n        \\label{fig:xsecerr}{\\bf Left panel:} the total cross section for\n        $t \\bar t H$, $\\sigma_{\\rm NNLO + NNLL + EW}$,\n        and the relative impact of the different\n    contributions with respect to $\\sigma_{\\rm NLO}$.\n    {\\bf Right panel:} scale uncertainties\n    computed for the cross section computed at different\n    accuracies.\n    Solid lines display the total width of the scale-uncertainty band,\n    while dashed line the maximum\n    variation with respect to the central prediction.%\n}\n\\end{figure}\n'
+
+#18
 s = r'''
 %%%%%%%%%%%%%%%%%%%%%%%%%
  \begin{figure}
@@ -797,7 +897,16 @@ s = r'''
  \end{figure}
 %%%%%%%%%%%%%%%%%%%%%%%%%%
 '''
-assert TeXFormatter(s) == '\n%%%%%%%%%%%%%%%%%%%%%%%%%\n\\begin{figure}\n    \\centering\n\\includegraphics[width=.49\\textwidth]{tth_nnll_comp_qcd_scet.pdf}\n\\includegraphics[width=.49\\textwidth]{tth_nnllnnlo_lhc136_asym.pdf}\n    \\caption{%\n        Left: comparison between NNLO+NNLL results in dQCD and\n        SCET for three parametrically different choices of the default%\n    scales.\n    Right: comparison of the combined NNLO+NNLL results with NNLO,\n    for the same three sets of scales.\n    No EW corrections are included.\n    See the text for\n    additional explanations on the estimation of the uncertainties. }\n    \\label{fig:tth_comparisons}\n\\end{figure}\n%%%%%%%%%%%%%%%%%%%%%%%%%%\n'
+assert TeXFormatter(s) == '\n%%%%%%%%%%%%%%%%%%%%%%%%%\n\\begin{figure}\n    \\centering\n\\includegraphics[width=.49\\textwidth]{tth_nnll_comp_qcd_scet.pdf}\n\\includegraphics[width=.49\\textwidth]{tth_nnllnnlo_lhc136_asym.pdf}\n    \\caption{%\n        Left: comparison between NNLO+NNLL results in dQCD and\n        SCET for three parametrically different choices of the default\n    scales.\n    Right: comparison of the combined NNLO+NNLL results with NNLO,\n    for the same three sets of scales.\n    No EW corrections are included.\n    See the text for\n    additional explanations on the estimation of the uncertainties. }\n    \\label{fig:tth_comparisons}\n\\end{figure}\n%%%%%%%%%%%%%%%%%%%%%%%%%%\n'
+
+#19
+s = r'''
+LO and NLO contributions different from $\Sigma_{\rm LO,1}$, $\Sigma_{\rm NLO,1}$, involve partonic processes with at least one photon in the initial state
+and therefore depend on the photon PDF. The dominant contribution originates from the process is
+$g \gamma  \to t\bar t H$,\footnote{See Ref.~\cite{Pagani:2016caq} for a analogous and more detailed discussion for the case of the $t \bar t$ production.}
+which enters both at LO and NLO. However, also $ q\gamma$ and $\gamma\gamma$ initial states are possible. The quantities $\Sigma_{\rm NLO~EW}$,  $\Sigma_{\rm NLO,3}$ and $ \Sigma_{\rm NLO,4}$ receive contributions from the $q\gamma\to t\bar t H q$ processes, while the $\gamma \gamma$ initial state contributes to $\Sigma_{\rm LO,3}$, via $\gamma\gamma\to t\bar t H $, to $\Sigma_{\rm NLO,3}$, via $\gamma\gamma\to t\bar t H g$, and to $ \Sigma_{\rm NLO,4}$, via $\gamma\gamma\to t\bar t H \gamma$.
+'''
+assert TeXFormatter(s) == '\nLO and NLO contributions different from $\\Sigma_{\\rm LO, 1}$,\n$\\Sigma_{\\rm NLO, 1}$,\ninvolve partonic processes with at least one photon in the initial state\nand therefore depend on the photon PDF.\nThe dominant contribution originates from the process is\n$g \\gamma \\to t \\bar t H$,\\footnote{%\n    See Ref.~\\cite{Pagani:2016caq} for a analogous and\n    more detailed discussion for the case of the $t \\bar t$ production.%\n}\nwhich enters both at LO and NLO.\nHowever, also $ q \\gamma$ and $\\gamma \\gamma$ initial states are possible.\nThe quantities $\\Sigma_{\\rm NLO~EW}$,\n$\\Sigma_{\\rm NLO, 3}$ and $ \\Sigma_{\\rm NLO, 4}$ receive contributions from the\n$q \\gamma \\to t \\bar t H q$ processes,\nwhile the $\\gamma \\gamma$ initial state contributes to $\\Sigma_{\\rm LO, 3}$,\nvia $\\gamma \\gamma \\to t \\bar t H $, to $\\Sigma_{\\rm NLO, 3}$,\nvia $\\gamma \\gamma \\to t \\bar t H g$, and to $ \\Sigma_{\\rm NLO, 4}$,\nvia $\\gamma \\gamma \\to t \\bar t H \\gamma$.\n'
 
 # 22
 s = r'''
@@ -828,6 +937,12 @@ We have checked analytically that with this choice of scales in the SCET express
 Moreover, the set of non-logarithmic (in $N$ or $\bar N$) terms collected in the perturbative hard and soft functions in Eqs.~\ref{b:kernelmellin},~\ref{eq:res:fact:dqcd} begin to differ at $\O (\alphas^2)$, what corresponds to differences of order N$^3$LL and higher.
 '''
 assert TeXFormatter(s) == '\nWe have checked analytically that with this\nchoice of scales in the SCET expressions,\nthey agree with the dQCD expressions up to the\nhigher order logarithmic terms in dQCD, as explained below.\nThese terms originate from various sources.\nTo start with,\nin SCET any ratio of scales of the form $\\ln \\mu_i / \\mu_j$ is counted as large,\nwhere $\\mu_i \\in \\{\\muF, \\muR, \\mu_s, \\mu_h\\}$.\nThis implies, for instance, that in the SCET formulas in the Mellin-space which\nare used here corrections logarithmic in\n$ \\bar N = N e^{\\gamma_E}$ are resummed.\nInstead, the particular formulation of the dQCD\nexpressions presented insection~\\ref{sec:theo-nnllk}, resums $\\ln N$ terms,\nwith additional terms involving $\\gamma_E$ included up to the NNLL accuracy.\nAnother difference stems from the treatment of the $\\exp (\\alphas g_3)$ term:\nwhile in dQCD it is fully included,\nin SCET its expansion up to $\\O (\\alphas)$ is considered.\nAlthough technically this term is of the NNLL accuracy,\nwe have checked that the numerical\nimpact of the difference in its implementation is negligible.\nMoreover, the set of non-logarithmic (in $N$ or $\\bar N$) terms collected\nin the perturbative hard and soft functions in Eqs.~\\ref{b:kernelmellin},%\n~\\ref{eq:res:fact:dqcd} begin to differ at $\\O (\\alphas^2)$,\nwhat corresponds to differences of order N$^3$LL and higher.\n'
+
+# 31
+s = r'''
+The jet functions $\Delta^i$ account for (soft-)collinear logarithmic contributions from the initial state partons and are well known at NNLL~\cite{Catani:1996yz,Catani:2003zt}.  The term $\mathbf{\bar{U}}_R\,\mathbf{\tilde S}_R \, \mathbf{{U}}_R$ originates from a solution of the renormalization group equation for the soft function and consists of the evolution matrices $\mathbf{\bar{U}}_R$, $\mathbf{{U}}_R$, as well as the function $\mathbf{\tilde S}_R$ which plays the role of a boundary condition of the renormalization group equation. The evolution matrices are given by (reverse in the case of $\mathbf{\bar{U}}_R$) path-ordered exponentials of the soft anomalous dimension matrix {$\mathbf{\bar \Gamma}_{ij\tosv \tth}(\alphas)= \left(\frac{\alphas}{\pi}\right) \mathbf{\bar \Gamma}^{(1)}_{ij\tosv \tth} +\left(\frac{\alphas}{\pi}\right)^2 \mathbf{\bar \Gamma}^{(2)}_{ij\tosv \tth}+\ldots$} which is obtained by subtracting the contributions already taken into account in $\Delta^i \Delta^j$ from the full soft anomalous dimension for the process $ij \to \tth$.   At NLL, the path-ordered exponentials collapse to standard exponential factors in the colour space $\mathbf R$ where $\mathbf \Gamma^{(1)}_R$  is diagonal.  At NNLL, the  path-ordered exponentials are eliminated by treating $\mathbf{U}_R$ and  $\mathbf{\bar{U}}_R$  perturbatively
+'''
+assert TeXFormatter(s) == '\nThe jet functions $\\Delta^i$ account for (soft-)collinear\nlogarithmic contributions from the initial state partons and\nare well known at NNLL~\\cite{Catani:1996yz, Catani:2003zt}.\nThe term $\\mathbf{\\bar{U}}_R \\, \\mathbf{\\tilde S}_R \\, \\mathbf{{U}}_R$\noriginates from a solution of the\nrenormalization group equation for the soft function and\nconsists of the evolution matrices $\\mathbf{\\bar{U}}_R$,\n$\\mathbf{{U}}_R$, as well as the function $\\mathbf{\\tilde S}_R$\nwhich plays the role of a boundary\ncondition of the renormalization group equation.\nThe evolution matrices are given by\n(reverse in the case of $\\mathbf{\\bar{U}}_R$)\npath-ordered exponentials of the soft anomalous dimension matrix {%\n    $\n        \\mathbf{\\bar \\Gamma}_{ij \\tosv \\tth}(\\alphas)\n        = \\left(\\frac{\\alphas}{\\pi}\\right)\n        \\mathbf{\\bar \\Gamma}^{(1)}_{ij \\tosv \\tth}\n        + \\left(\\frac{\\alphas}{\\pi}\\right)^2\n        \\mathbf{\\bar \\Gamma}^{(2)}_{ij \\tosv \\tth}\n        + \\ldots\n    $%\n} which is obtained by subtracting the contributions\nalready taken into account in $\\Delta^i \\Delta^j$\nfrom the full soft anomalous dimension for the process $ij \\to \\tth$.\nAt NLL, the path-ordered exponentials collapse to standard\nexponential factors in the colour space\n$\\mathbf R$ where $\\mathbf \\Gamma^{(1)}_R$ is diagonal.\nAt NNLL,\nthe path-ordered exponentials are eliminated by treating $\\mathbf{U}_R$ and\n$\\mathbf{\\bar{U}}_R$ perturbatively\n'
 
 # 34
 s = r'''
