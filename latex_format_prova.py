@@ -22,8 +22,9 @@ equal_list = ['=', r'\\equiv', r'\\cong', r'\\neq']
 backslash_prefactor = [r'\(', r'\[', r'\{', r'\s', r'\$', r'\^', r'\\', r'\-',
                        r'\|', '_', '%']
 context_list = [r'\\label', r'\\text']
+def_list = [r'\def', r'\newcommand', r'\renewcommand']
 
-### Define re patterns:
+### Define regex patterns:
 pattern_separate = re.compile('|'.join(separate_list))
 pattern_arrow = re.compile('|'.join(arrow_list))
 pattern_equal = re.compile('|'.join(equal_list))
@@ -64,6 +65,8 @@ class Parenthesis():
             return cls.CLOSE_PARENTHESIS[cls.OPEN_PARENTHESIS.index(char)]
         elif char in cls.CLOSE_PARENTHESIS:
             return cls.OPEN_PARENTHESIS[cls.CLOSE_PARENTHESIS.index(char)]
+        elif char == '$':
+            return char
         raise ValueError()
 
     @classmethod
@@ -110,11 +113,13 @@ class Parenthesis():
                 f'Expected: {self.get_match(schar)}, '
                 f'Found: {char}'
             )
+        if char == '$':
+            self.in_equation = False
         return False
 
     def parse(self, line: str, unmatched_parenthesis: str) -> ParenthesisType:
         self.line = line
-        self.in_equation = False
+        self.in_equation = '$' in unmatched_parenthesis
         self.parenthesis_structure = {}
         self.levels: list[tuple[int, str]] = []
         self.current_struct = self.parenthesis_structure
@@ -201,7 +206,11 @@ class TeXFormatter:
         return self._context[-1]
 
     def update_context(self, line: str) -> None:
-        if '\\begin' in line:
+        if any(x in line for x in def_list):
+            return
+        # if self.context == 'text' and '$' in self.multline_parenthesis:
+        #     self._context.append('equation')
+        if r'\begin' in line:
             if 'equation' in line or 'align' in line or 'eqnarray' in line:
                 self._context.append('equation')
             elif 'document' in line or 'figure' in line:
@@ -210,9 +219,9 @@ class TeXFormatter:
                 from warnings import warn
                 warn(f'unknown environment: {line}')
                 self._context.append(self._context[-1])
-        elif r'beq' in line:
+        elif r'\beq' in line:
             self._context.append('equation')
-        if '\\end' in line:
+        if r'\end' in line:
             self._context.pop()
         elif r'\eeq' in line:
             self._context.pop()
@@ -248,7 +257,10 @@ class TeXFormatter:
             # Make sure all the commas are followed by a space, except for ,~
             # and footnotes
             line = re.sub(r',(?!\s|~|\\footnote)', r', ', line)
-            if r'\begin' in line.strip(' %')[6:]:
+            # Move "begin" commands to a new line.
+            # TODO: The check for "def" commands should be better.
+            if (r'\begin' in line.strip(' %')[6:]
+                    and all(x not in line for x in def_list)):
                 idx = line.index(r'\begin')
                 if not ((match := re.search(r'(?<!\\)%', line))
                         and match.start() < idx):
@@ -307,7 +319,6 @@ class TeXFormatter:
         self.indent = ''
         for (start, end), char in parenthesis:
             start = start or 0
-            end = end or len(line)
             if not start:
                 self.indent = ''
             if char == '{':
@@ -315,6 +326,10 @@ class TeXFormatter:
                     add_space.extend(self._text_addspace(line[start+1:end],
                                                          start+1))
                     continue
+            elif char == '$':
+                if end is None:
+                    self._context.pop()
+                continue
             add_space.extend(self._equation_addspace(line[start+1:end],
                                                      start+1))
         return [offset + n for n in add_space]
@@ -334,6 +349,8 @@ class TeXFormatter:
                 add_space.extend(
                     self._equation_addspace(line[start+1:end], offset=start+1)
                 )
+                if end is None:
+                    self._context.append('equation')
         return [offset + n for n in add_space]
 
     def _format_spaces_operation(self, line: str, offset: int = 0
@@ -374,10 +391,33 @@ class TeXFormatter:
                 self.indent = '%' + ' ' * (level - 1)
             elif (match := re.search(r'(?<!\\)%(?!$)', line)):
                 self.commentafter = match.start()
+            if line.replace('$$', '$').count('$') % 2 == 1:
+                if (self.context == 'text'
+                        and ('$' not in self.multline_parenthesis
+                             or line.strip()[0] != '$')
+                        and line.partition('%')[0].strip()[-1] != '$'):
+                    assert '$' not in self.multline_parenthesis, line
+                    idx = line[::-1].find('$')
+                    new_content.extend(self.format_tex([line[:-idx]]))
+                    self._context.append('equation')
+                    new_content.extend(self.format_tex(
+                        [self.indent + 4*' ' + line[-idx:].lstrip()]
+                    ))
+                    continue
+                elif self.context == 'equation':
+                    idx = line.find('$')
+                    if idx > 0:
+                        new_content.extend(self.format_tex([line[:idx]]))
+                    self._context.pop()
+                    # if '$' in self.multline_parenthesis:
+                    #     assert self.multline_parenthesis[-1] == '$'
+                    #     self.multline_parenthesis = self.multline_parenthesis[:-1]
+                    new_content.extend(self.format_tex([line[idx:]]))
+                    continue
             # If line is shoft enough, leave it as it is
             if len(line) <= 80:
                 if not first and self.context == 'equation':
-                    # TODO: If previous lines were broken, check that all
+                    # TODO: If previous lines were splitted, check that all
                     # TODO: operations here have lower priority. For example,
                     # TODO: if the previous line splitted sums, and this line
                     # TODO: contains some sums, we should split them also.
@@ -530,6 +570,10 @@ class TeXFormatter:
         if self.commentafter < len(line):
             new_lines = [line[:self.commentafter], line[self.commentafter:]]
             return self.format_tex(new_lines)
+        # Split newlines into a new line
+        pattern = re.compile(r'(\\\\|\\newline)(?=.)')
+        if pattern.search(skeleton):
+            return self.line_split(line, pattern, keep='first')
         # Split sentences (separated by . or ?) into multiple lines
         pattern = re.compile(r'.[\.\?](?=\s[A-Z{])')
         if pattern.search(skeleton[:-1]):
@@ -542,22 +586,22 @@ class TeXFormatter:
             return self.line_split(line, ',', keep='first')
         # Split the line by ' and '
         elif ' and ' in skeleton[:-1]:
-            return self.line_split(line, r'(?<=\s)and(?=\s)', keep='first')
+            return self.line_split(line, r'(?<=\s)and(?=\s)', keep='second')
         # Split the formulas into a new line.
         new_lines = []
         if skeleton == '$$':
             start = self.get_index_line(0, line)
             end = self.get_index_line(1, line)
-            new_lines.append(line[:start+1])
+            new_lines.append(line[:start+1].rstrip() + '\n')
             self._context.append('equation')
             indent = self.indent
             new_lines.extend(self.format_tex(
                 [indent + 4 * ' ' + line[start+1:end].lstrip()]
             ))
             self._context.pop()
-            # TODO: Add % after last $.
-            new_lines.append(indent + line[end:].lstrip())
-            return self.format_tex(filter(lambda x: x, new_lines))
+            # TODO?: Add % after last $.
+            new_lines.append(indent + line[end:].strip() + '\n')
+            return [line for line in new_lines if line]
         if ' $$' in skeleton:
             return self.line_split(line, r'\s\$\$', keep=True)
         # Split {} into multiple lines
@@ -722,6 +766,13 @@ class TeXFormatter:
                 self.multline_parenthesis = self.multline_parenthesis[:-1]
                 continue
             elif char == '$':
+                if '$' not in self.multline_parenthesis:
+                    assert line.rstrip()[-1] == '$'
+                    self.multline_parenthesis += '$'
+                    self._context.append('equation')
+                else:
+                    assert self.multline_parenthesis[-1] == '$'
+                    self.multline_parenthesis = self.multline_parenthesis[:-1]
                 continue
             sent = False
             if char in open_p:
