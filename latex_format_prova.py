@@ -22,8 +22,9 @@ equal_list = ['=', r'\\equiv', r'\\cong', r'\\neq']
 backslash_prefactor = [r'\(', r'\[', r'\{', r'\s', r'\$', r'\^', r'\\', r'\-',
                        r'\|', '_', '%']
 context_list = [r'\\label', r'\\text']
+def_list = [r'\def', r'\newcommand', r'\renewcommand']
 
-### Define re patterns:
+### Define regex patterns:
 pattern_separate = re.compile('|'.join(separate_list))
 pattern_arrow = re.compile('|'.join(arrow_list))
 pattern_equal = re.compile('|'.join(equal_list))
@@ -64,6 +65,8 @@ class Parenthesis():
             return cls.CLOSE_PARENTHESIS[cls.OPEN_PARENTHESIS.index(char)]
         elif char in cls.CLOSE_PARENTHESIS:
             return cls.OPEN_PARENTHESIS[cls.CLOSE_PARENTHESIS.index(char)]
+        elif char == '$':
+            return char
         raise ValueError()
 
     @classmethod
@@ -110,11 +113,13 @@ class Parenthesis():
                 f'Expected: {self.get_match(schar)}, '
                 f'Found: {char}'
             )
+        if char == '$':
+            self.in_equation = False
         return False
 
     def parse(self, line: str, unmatched_parenthesis: str) -> ParenthesisType:
         self.line = line
-        self.in_equation = False
+        self.in_equation = '$' in unmatched_parenthesis
         self.parenthesis_structure = {}
         self.levels: list[tuple[int, str]] = []
         self.current_struct = self.parenthesis_structure
@@ -201,7 +206,11 @@ class TeXFormatter:
         return self._context[-1]
 
     def update_context(self, line: str) -> None:
-        if '\\begin' in line:
+        if any(x in line for x in def_list):
+            return
+        # if self.context == 'text' and '$' in self.multline_parenthesis:
+        #     self._context.append('equation')
+        if r'\begin' in line:
             if 'equation' in line or 'align' in line or 'eqnarray' in line:
                 self._context.append('equation')
             elif 'document' in line or 'figure' in line:
@@ -210,9 +219,9 @@ class TeXFormatter:
                 from warnings import warn
                 warn(f'unknown environment: {line}')
                 self._context.append(self._context[-1])
-        elif r'beq' in line:
+        elif r'\beq' in line:
             self._context.append('equation')
-        if '\\end' in line:
+        if r'\end' in line:
             self._context.pop()
         elif r'\eeq' in line:
             self._context.pop()
@@ -248,7 +257,10 @@ class TeXFormatter:
             # Make sure all the commas are followed by a space, except for ,~
             # and footnotes
             line = re.sub(r',(?!\s|~|\\footnote)', r', ', line)
-            if r'\begin' in line.strip(' %')[6:]:
+            # Move "begin" commands to a new line.
+            # TODO: The check for "def" commands should be better.
+            if (r'\begin' in line.strip(' %')[6:]
+                    and all(x not in line for x in def_list)):
                 idx = line.index(r'\begin')
                 if not ((match := re.search(r'(?<!\\)%', line))
                         and match.start() < idx):
@@ -307,7 +319,6 @@ class TeXFormatter:
         self.indent = ''
         for (start, end), char in parenthesis:
             start = start or 0
-            end = end or len(line)
             if not start:
                 self.indent = ''
             if char == '{':
@@ -315,6 +326,10 @@ class TeXFormatter:
                     add_space.extend(self._text_addspace(line[start+1:end],
                                                          start+1))
                     continue
+            elif char == '$':
+                if end is None:
+                    self._context.pop()
+                continue
             add_space.extend(self._equation_addspace(line[start+1:end],
                                                      start+1))
         return [offset + n for n in add_space]
@@ -334,6 +349,8 @@ class TeXFormatter:
                 add_space.extend(
                     self._equation_addspace(line[start+1:end], offset=start+1)
                 )
+                if end is None:
+                    self._context.append('equation')
         return [offset + n for n in add_space]
 
     def _format_spaces_operation(self, line: str, offset: int = 0
@@ -374,10 +391,33 @@ class TeXFormatter:
                 self.indent = '%' + ' ' * (level - 1)
             elif (match := re.search(r'(?<!\\)%(?!$)', line)):
                 self.commentafter = match.start()
+            if line.replace('$$', '$').count('$') % 2 == 1:
+                if (self.context == 'text'
+                        and ('$' not in self.multline_parenthesis
+                             or line.strip()[0] != '$')
+                        and line.partition('%')[0].strip()[-1] != '$'):
+                    assert '$' not in self.multline_parenthesis, line
+                    idx = line[::-1].find('$')
+                    new_content.extend(self.format_tex([line[:-idx]]))
+                    self._context.append('equation')
+                    new_content.extend(self.format_tex(
+                        [self.indent + 4*' ' + line[-idx:].lstrip()]
+                    ))
+                    continue
+                elif self.context == 'equation':
+                    idx = line.find('$')
+                    if idx > 0:
+                        new_content.extend(self.format_tex([line[:idx]]))
+                    self._context.pop()
+                    # if '$' in self.multline_parenthesis:
+                    #     assert self.multline_parenthesis[-1] == '$'
+                    #     self.multline_parenthesis = self.multline_parenthesis[:-1]
+                    new_content.extend(self.format_tex([line[idx:]]))
+                    continue
             # If line is shoft enough, leave it as it is
             if len(line) <= 80:
                 if not first and self.context == 'equation':
-                    # TODO: If previous lines were broken, check that all
+                    # TODO: If previous lines were splitted, check that all
                     # TODO: operations here have lower priority. For example,
                     # TODO: if the previous line splitted sums, and this line
                     # TODO: contains some sums, we should split them also.
@@ -530,6 +570,10 @@ class TeXFormatter:
         if self.commentafter < len(line):
             new_lines = [line[:self.commentafter], line[self.commentafter:]]
             return self.format_tex(new_lines)
+        # Split newlines into a new line
+        pattern = re.compile(r'(\\\\|\\newline)(?=.)')
+        if pattern.search(skeleton):
+            return self.line_split(line, pattern, keep='first')
         # Split sentences (separated by . or ?) into multiple lines
         pattern = re.compile(r'.[\.\?](?=\s[A-Z{])')
         if pattern.search(skeleton[:-1]):
@@ -542,22 +586,22 @@ class TeXFormatter:
             return self.line_split(line, ',', keep='first')
         # Split the line by ' and '
         elif ' and ' in skeleton[:-1]:
-            return self.line_split(line, r'(?<=\s)and(?=\s)', keep='first')
+            return self.line_split(line, r'(?<=\s)and(?=\s)', keep='second')
         # Split the formulas into a new line.
         new_lines = []
         if skeleton == '$$':
             start = self.get_index_line(0, line)
             end = self.get_index_line(1, line)
-            new_lines.append(line[:start+1])
+            new_lines.append(line[:start+1].rstrip() + '\n')
             self._context.append('equation')
             indent = self.indent
             new_lines.extend(self.format_tex(
                 [indent + 4 * ' ' + line[start+1:end].lstrip()]
             ))
             self._context.pop()
-            # TODO: Add % after last $.
-            new_lines.append(indent + line[end:].lstrip())
-            return self.format_tex(filter(lambda x: x, new_lines))
+            # TODO?: Add % after last $.
+            new_lines.append(indent + line[end:].strip() + '\n')
+            return [line for line in new_lines if line]
         if ' $$' in skeleton:
             return self.line_split(line, r'\s\$\$', keep=True)
         # Split {} into multiple lines
@@ -722,6 +766,13 @@ class TeXFormatter:
                 self.multline_parenthesis = self.multline_parenthesis[:-1]
                 continue
             elif char == '$':
+                if '$' not in self.multline_parenthesis:
+                    assert line.rstrip()[-1] == '$'
+                    self.multline_parenthesis += '$'
+                    self._context.append('equation')
+                else:
+                    assert self.multline_parenthesis[-1] == '$'
+                    self.multline_parenthesis = self.multline_parenthesis[:-1]
                 continue
             sent = False
             if char in open_p:
@@ -770,6 +821,7 @@ def run_from_command() -> None:
     dest = pathdir / pathlib.Path(sys.argv[1])
     with filename.open() as file:
         content = file.readlines()
+    # import pdb; pdb.set_trace()
     new_content = TeXFormatter(content).formatted_lines
     with dest.open('w') as file:
         file.writelines(new_content)
@@ -777,10 +829,7 @@ def run_from_command() -> None:
 
 def run_from_editor() -> None:
     s = r'''
-where $f_{i / h}(x, \muF^2)$ are moments of the parton
-distribution functions and $ d \hat \si^{\rm
-(res)}_{ij\tosv \tth}/ dQ^2 \left.
-\right|_{\scriptscriptstyle({\rm NNLO})}$ represents the perturbative expansion of the resummed cross section truncated at NNLO. The inverse Mellin transform (\ref{invmel}) is evaluated numerically using according to the ``Minimal Prescription'' ~ \cite{Catani:1996 yz}along a contour ${\sf C}$ in the complex-$N$ space.
+distribution functions and $d \hat \si^{\rm(res)}_{ij\tosv \tth}/ dQ^2 \left. \right|_{\scriptscriptstyle({\rm NNLO})}$ represents the perturbative expansion of the resummed cross section truncated at NNLO. The inverse Mellin transform (\ref{invmel}) is evaluated numerically using according to the ``Minimal Prescription'' ~\cite{Catani:1996yz}
 '''
     r = TeXFormatter(s)
     print(r)
@@ -795,20 +844,17 @@ if __name__ == '__main__':
 
 ### TESTS ###
 
-# ?
-s = r'''
-where $f_{i / h}(x, \muF^2)$ are moments of the parton
-distribution functions and $ d \hat \si^{\rm
-(res)}_{ij\tosv \tth}/ dQ^2 \left.
-\right|_{\scriptscriptstyle({\rm NNLO})}$ represents the perturbative expansion of the resummed cross section truncated at NNLO. The inverse Mellin transform (\ref{invmel}) is evaluated numerically using according to the ``Minimal Prescription'' ~ \cite{Catani:1996 yz}along a contour ${\sf C}$ in the complex-$N$ space.
-'''
-assert TeXFormatter(s) == ''
-
 # 5
 s = r'''
 \cite{CMS:2014wdm,CMS:2017odg,ATLAS:2017ztq,CMS:2018fdh,ATLAS:2018mme,ATLAS:2018kot,ATLAS:2018ynr},
 '''
 assert TeXFormatter(s) == '\n\\cite{%\n    CMS:2014wdm, CMS:2017odg, ATLAS:2017ztq, CMS:2018fdh,\n    ATLAS:2018mme, ATLAS:2018kot, ATLAS:2018ynr%\n},\n'
+
+# 5
+s = r'''
+\title{State-of-the-art cross sections for $\boldsymbol{t\bar t H}$:\\ NNLO predictions matched with NNLL resummation and EW corrections}
+'''
+assert TeXFormatter(s) == '\n\\title{%\n    State-of-the-art cross sections for $\\boldsymbol{t \\bar t H}$:\\\\\n    NNLO predictions matched with NNLL resummation and EW corrections%\n}\n'
 
 # 6
 s = r'''
@@ -822,17 +868,35 @@ assert TeXFormatter(s) == '\n\\begin{itemize}\n\\item $\\muF = \\muR = m_t + m_H
 
 # 6
 s = r'''
+In particular, we are interested in evolving $S$ from the scale where renormalization takes place $\mu_0=\mu_R$ to the soft scale $\mu = Q\bar{N}^{-1}$. Where $\bar{N}=Ne^{\gamma_E}$ as defined in \cite{Kulesza17}. Then
+'''
+assert TeXFormatter(s) == '\nIn particular, we are interested in evolving $S$\nfrom the scale where renormalization takes place\n$\\mu_0 = \\mu_R$ to the soft scale $\\mu = Q \\bar{N}^{-1}$.\nWhere $\\bar{N} = Ne^{\\gamma_E}$ as defined in \\cite{Kulesza17}.\nThen\n'
+
+# 6
+s = r'''
 \def\cCode#1{\begin{lstlisting}[mathescape,basicstyle=\small
 \ttfamily,frame=leftline,aboveskip=4mm,belowskip=4mm,xleftmargin=20pt,framexleftmargin=10pt,
 numbers=none,framerule=2pt,abovecaptionskip=0.0mm,belowcaptionskip=3.5mm #1]}
 '''
-assert TeXFormatter(s) == '\n\\def\\cCode#1{\n\\begin{lstlisting}[mathescape, basicstyle=\\small\n\\ttfamily, frame=leftline, aboveskip=4mm, belowskip=4mm,\nxleftmargin=20pt, framexleftmargin=10pt,\nnumbers=none, framerule=2pt, abovecaptionskip=0.0mm, belowcaptionskip=3.5mm #1]}\n'
+assert TeXFormatter(s) == '\n\\def\\cCode#1{\\begin{lstlisting}[mathescape, basicstyle=\\small\n\\ttfamily, frame=leftline, aboveskip=4mm, belowskip=4mm,\nxleftmargin=20pt, framexleftmargin=10pt,\nnumbers=none, framerule=2pt, abovecaptionskip=0.0mm, belowcaptionskip=3.5mm #1]}\n'
 
-# 6
+#6
 s = r'''
-In particular, we are interested in evolving $S$ from the scale where renormalization takes place $\mu_0=\mu_R$ to the soft scale $\mu = Q\bar{N}^{-1}$. Where $\bar{N}=Ne^{\gamma_E}$ as defined in \cite{Kulesza17}. Then
+where $\left.\sigma_{\rm NNLL}^{\rm SCET}\right|_{\alphas^2}$ ($\left.\sigma_{\rm NNLL}^{\rm dQCD}\right|_{\alphas^2}$) is
+the expansion of $ \sigma_{\rm NNLL}^{\rm SCET}$ ($ \sigma_{\rm NNLL}^{\rm dQCD}$) up to order $\alphas^2$.\\
+The two resummed predictions are combined by simply considering their average:
 '''
-assert TeXFormatter(s) == '\nIn particular, we are interested in evolving $S$\nfrom the scale where renormalization takes place\n$\\mu_0 = \\mu_R$ to the soft scale $\\mu = Q \\bar{N}^{-1}$.\nWhere $\\bar{N} = Ne^{\\gamma_E}$ as defined in \\cite{Kulesza17}.\nThen\n'
+assert TeXFormatter(s) == '\nwhere $\\left. \\sigma_{\\rm NNLL}^{\\rm SCET}\\right|_{\\alphas^2}$\n($\\left. \\sigma_{\\rm NNLL}^{\\rm dQCD}\\right|_{\\alphas^2}$) is\nthe expansion of $ \\sigma_{\\rm NNLL}^{\\rm SCET}$\n($ \\sigma_{\\rm NNLL}^{\\rm dQCD}$) up to order $\\alphas^2$.\\\\\nThe two resummed predictions are combined by simply considering their average:\n'
+
+# 8
+s = r'''
+Now, equating both derivatives and using equation \eqref{eq:Kmatrix} for $U$ we arrive at the following equation:
+\begin{equation*}
+    \frac{\Gamma(\alpha_S)}{\beta(\alpha_S)}K(\alpha_S)
+    = \dv{K(\alpha_S)}{\alpha_S} - K(\alpha_S)\frac{\Gamma^{(1)}}{2\pi\alpha_Sb_0}
+\end{equation*}
+'''
+assert TeXFormatter(s) == '\nNow, equating both derivatives and using equation \\eqref{eq:Kmatrix} for\n$U$ we arrive at the following equation:\n\\begin{equation*}\n    \\frac{\\Gamma(\\alpha_S)}{\\beta(\\alpha_S)} K(\\alpha_S)\n    = \\dv{K(\\alpha_S)}{\\alpha_S}\n    - K(\\alpha_S) \\frac{\\Gamma^{(1)}}{2 \\pi \\alpha_S b_0}\n\\end{equation*}\n'
 
 # 10
 s = r'''
@@ -851,6 +915,22 @@ s = r'''
 \end{equation*}
 '''
 assert TeXFormatter(s) == '\n\\begin{equation*}\n    -b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu_0^2})\n    = \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0} \\log(\n        \\frac{\n            \\frac{\\alpha_S(\\mu_0^2)}{\\alpha_S(\\mu^2)}\n            + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0}\n        }{1 + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0}}\n    )\n    + 1\n    - \\frac{\\alpha_S(\\mu_0^2)}{\\alpha_S(\\mu^2)}\n    + \\order{\\alpha_S^2}\n\\end{equation*}\n'
+
+# 13
+s = r'''
+where $f_{i / h}(x, \muF^2)$ are moments of the parton
+distribution functions and $ d \hat \si^{\rm
+(res)}_{ij\tosv \tth}/ dQ^2 \left.
+\right|_{\scriptscriptstyle({\rm NNLO})}$ represents the perturbative expansion of the resummed cross section truncated at NNLO. The inverse Mellin transform (\ref{invmel}) is evaluated numerically using according to the ``Minimal Prescription'' ~\cite{Catani:1996 yz}
+along a contour ${\sf C}$ in the complex-$N$ space.
+'''
+assert TeXFormatter(s) == "\nwhere $f_{i / h}(x, \\muF^2)$ are moments of the parton\ndistribution functions and $\n    d \\hat \\si^{\n        \\rm\n(res)}_{ij \\tosv \\tth} / dQ^2 \\left.\n\\right|_{\\scriptscriptstyle({\\rm NNLO})}\n$\nrepresents the perturbative expansion\nof the resummed cross section truncated at NNLO.\nThe inverse Mellin transform (\\ref{invmel}) is evaluated numerically\nusing according to the ``Minimal Prescription'' ~\\cite{Catani:1996 yz}\nalong a contour ${\\sf C}$ in the complex-$N$ space.\n"
+
+# 14
+s = '''
+However, the consequence is that the non-radiative amplitude in the r.h.s. of eq. \\eqref{eq:NLP} is evaluated using the momenta $p$, which are unphysical for this process, because $\\sum \\eta_i p_i \\neq 0$. This might seem problematic because an amplitude is intrinsically defined for physical momenta, and it is not uniquely defined for unphysical momenta. Therefore, the value of $\\mathcal{H}(p)$ is ambiguous, which translates into an ambiguity on $\\mathcal{A}(p, k)$ and thus seems to invalidate eq. \\eqref{eq:NLP}. The argument, however, is not entirely correct, as shown in \\cite{Balsach:2023ema}. Indeed, although an ambiguity is present, it only affects the NNLP terms.
+'''
+assert TeXFormatter(s) == '\nHowever,\nthe consequence is that the non-radiative amplitude in the r.h.s. of eq.\n\\eqref{eq:NLP} is evaluated using the momenta $p$,\nwhich are unphysical for this process, because $\\sum \\eta_i p_i \\neq 0$.\nThis might seem problematic because an amplitude is\nintrinsically defined for physical momenta,\nand it is not uniquely defined for unphysical momenta.\nTherefore, the value of $\\mathcal{H}(p)$ is ambiguous,\nwhich translates into an ambiguity on $\\mathcal{A}(p, k)$\nand thus seems to invalidate eq. \\eqref{eq:NLP}.\nThe argument, however, is not entirely correct,\nas shown in \\cite{Balsach:2023ema}.\nIndeed, although an ambiguity is present, it only affects the NNLP terms.\n'
 
 # 15
 s = r'''
@@ -897,7 +977,7 @@ s = r'''
  \end{figure}
 %%%%%%%%%%%%%%%%%%%%%%%%%%
 '''
-assert TeXFormatter(s) == '\n%%%%%%%%%%%%%%%%%%%%%%%%%\n\\begin{figure}\n    \\centering\n\\includegraphics[width=.49\\textwidth]{tth_nnll_comp_qcd_scet.pdf}\n\\includegraphics[width=.49\\textwidth]{tth_nnllnnlo_lhc136_asym.pdf}\n    \\caption{%\n        Left: comparison between NNLO+NNLL results in dQCD and\n        SCET for three parametrically different choices of the default\n    scales.\n    Right: comparison of the combined NNLO+NNLL results with NNLO,\n    for the same three sets of scales.\n    No EW corrections are included.\n    See the text for\n    additional explanations on the estimation of the uncertainties. }\n    \\label{fig:tth_comparisons}\n\\end{figure}\n%%%%%%%%%%%%%%%%%%%%%%%%%%\n'
+assert TeXFormatter(s) == '\n%%%%%%%%%%%%%%%%%%%%%%%%%\n\\begin{figure}\n    \\centering\n\\includegraphics[width=.49\\textwidth]{tth_nnll_comp_qcd_scet.pdf}\n\\includegraphics[width=.49\\textwidth]{tth_nnllnnlo_lhc136_asym.pdf}\n    \\caption{%\n        Left: comparison between NNLO+NNLL results in dQCD\n        and SCET for three parametrically different choices of the default\n    scales.\n    Right: comparison of the combined NNLO+NNLL results with NNLO,\n    for the same three sets of scales.\n    No EW corrections are included.\n    See the text for\n    additional explanations on the estimation of the uncertainties. }\n    \\label{fig:tth_comparisons}\n\\end{figure}\n%%%%%%%%%%%%%%%%%%%%%%%%%%\n'
 
 #19
 s = r'''
@@ -906,7 +986,7 @@ and therefore depend on the photon PDF. The dominant contribution originates fro
 $g \gamma  \to t\bar t H$,\footnote{See Ref.~\cite{Pagani:2016caq} for a analogous and more detailed discussion for the case of the $t \bar t$ production.}
 which enters both at LO and NLO. However, also $ q\gamma$ and $\gamma\gamma$ initial states are possible. The quantities $\Sigma_{\rm NLO~EW}$,  $\Sigma_{\rm NLO,3}$ and $ \Sigma_{\rm NLO,4}$ receive contributions from the $q\gamma\to t\bar t H q$ processes, while the $\gamma \gamma$ initial state contributes to $\Sigma_{\rm LO,3}$, via $\gamma\gamma\to t\bar t H $, to $\Sigma_{\rm NLO,3}$, via $\gamma\gamma\to t\bar t H g$, and to $ \Sigma_{\rm NLO,4}$, via $\gamma\gamma\to t\bar t H \gamma$.
 '''
-assert TeXFormatter(s) == '\nLO and NLO contributions different from $\\Sigma_{\\rm LO, 1}$,\n$\\Sigma_{\\rm NLO, 1}$,\ninvolve partonic processes with at least one photon in the initial state\nand therefore depend on the photon PDF.\nThe dominant contribution originates from the process is\n$g \\gamma \\to t \\bar t H$,\\footnote{%\n    See Ref.~\\cite{Pagani:2016caq} for a analogous and\n    more detailed discussion for the case of the $t \\bar t$ production.%\n}\nwhich enters both at LO and NLO.\nHowever, also $ q \\gamma$ and $\\gamma \\gamma$ initial states are possible.\nThe quantities $\\Sigma_{\\rm NLO~EW}$,\n$\\Sigma_{\\rm NLO, 3}$ and $ \\Sigma_{\\rm NLO, 4}$ receive contributions from the\n$q \\gamma \\to t \\bar t H q$ processes,\nwhile the $\\gamma \\gamma$ initial state contributes to $\\Sigma_{\\rm LO, 3}$,\nvia $\\gamma \\gamma \\to t \\bar t H $, to $\\Sigma_{\\rm NLO, 3}$,\nvia $\\gamma \\gamma \\to t \\bar t H g$, and to $ \\Sigma_{\\rm NLO, 4}$,\nvia $\\gamma \\gamma \\to t \\bar t H \\gamma$.\n'
+assert TeXFormatter(s) == '\nLO and NLO contributions different from $\\Sigma_{\\rm LO, 1}$,\n$\\Sigma_{\\rm NLO, 1}$,\ninvolve partonic processes with at least one photon in the initial state\nand therefore depend on the photon PDF.\nThe dominant contribution originates from the process is\n$g \\gamma \\to t \\bar t H$,\\footnote{%\n    See Ref.~\\cite{Pagani:2016caq} for a analogous\n    and more detailed discussion for the case of the $t \\bar t$ production.%\n}\nwhich enters both at LO and NLO.\nHowever, also $ q \\gamma$ and $\\gamma \\gamma$ initial states are possible.\nThe quantities $\\Sigma_{\\rm NLO~EW}$,\n$\\Sigma_{\\rm NLO, 3}$ and $ \\Sigma_{\\rm NLO, 4}$ receive contributions from the\n$q \\gamma \\to t \\bar t H q$ processes,\nwhile the $\\gamma \\gamma$ initial state contributes to $\\Sigma_{\\rm LO, 3}$,\nvia $\\gamma \\gamma \\to t \\bar t H $, to $\\Sigma_{\\rm NLO, 3}$,\nvia $\\gamma \\gamma \\to t \\bar t H g$, and to $ \\Sigma_{\\rm NLO, 4}$,\nvia $\\gamma \\gamma \\to t \\bar t H \\gamma$.\n'
 
 # 22
 s = r'''
@@ -931,18 +1011,18 @@ Putting everything together in equation \eqref{eq:Kmatrix} we have
 '''
 assert TeXFormatter(s) == '\nwhich we can now solve iteratively by substituting\nthe formula onto itself (and neglecting $\\order{\\alpha_S^2}$ terms).\nNote that $\\mu \\ll \\mu_0$,\nso in general $\\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu^2_0})$\nis not necessarily a small quantity and thus we cannot neglect those terms\n\\begin{align*}\n    \\frac{\\alpha_S(\\mu_0^2)}{\\alpha_S(\\mu^2)} &\n    = 1\n    + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu_0^2})\n    + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0} \\log(\n        1 + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu^2_0}) + \\order{\\alpha_S}\n    )\n    + \\order{\\alpha_S^2} \\\\&\n    = 1\n    + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu_0^2})\n    + \\alpha_S(\\mu_0^2) \\frac{b_1}{b_0} \\log(\n        1 + b_0 \\alpha_S(\\mu_0^2) \\log(\\frac{\\mu^2}{\\mu^2_0})\n    )\n    + \\order{\\alpha_S^2}\n\\end{align*}\nPutting everything together in equation \\eqref{eq:Kmatrix} we have\n'
 
-# 25
+# 26
 s = r'''
 We have checked analytically that with this choice of scales in the SCET expressions, they agree with the dQCD expressions up to the higher order logarithmic terms in dQCD, as explained below. These terms originate from various sources. To start with, in SCET any ratio of scales of the form $\ln \mu_i/\mu_j$ is counted as large, where $\mu_i \in \{\muF,\muR,\mu_s,\mu_h\}$. This implies, for instance, that in the SCET formulas in the Mellin-space which are used here corrections logarithmic in $ \bar N = N e^{\gamma_E}$ are resummed. Instead, the particular formulation of the dQCD expressions presented insection~\ref{sec:theo-nnllk}, resums $\ln N$ terms, with additional terms involving $\gamma_E$ included up to the NNLL accuracy. Another difference stems from the treatment of the  $\exp (\alphas g_3)$ term: while in dQCD it is fully included, in SCET its expansion up to $\O (\alphas)$ is considered. Although technically this term is of the NNLL accuracy, we have checked that the numerical impact of the difference in its implementation is negligible.
 Moreover, the set of non-logarithmic (in $N$ or $\bar N$) terms collected in the perturbative hard and soft functions in Eqs.~\ref{b:kernelmellin},~\ref{eq:res:fact:dqcd} begin to differ at $\O (\alphas^2)$, what corresponds to differences of order N$^3$LL and higher.
 '''
-assert TeXFormatter(s) == '\nWe have checked analytically that with this\nchoice of scales in the SCET expressions,\nthey agree with the dQCD expressions up to the\nhigher order logarithmic terms in dQCD, as explained below.\nThese terms originate from various sources.\nTo start with,\nin SCET any ratio of scales of the form $\\ln \\mu_i / \\mu_j$ is counted as large,\nwhere $\\mu_i \\in \\{\\muF, \\muR, \\mu_s, \\mu_h\\}$.\nThis implies, for instance, that in the SCET formulas in the Mellin-space which\nare used here corrections logarithmic in\n$ \\bar N = N e^{\\gamma_E}$ are resummed.\nInstead, the particular formulation of the dQCD\nexpressions presented insection~\\ref{sec:theo-nnllk}, resums $\\ln N$ terms,\nwith additional terms involving $\\gamma_E$ included up to the NNLL accuracy.\nAnother difference stems from the treatment of the $\\exp (\\alphas g_3)$ term:\nwhile in dQCD it is fully included,\nin SCET its expansion up to $\\O (\\alphas)$ is considered.\nAlthough technically this term is of the NNLL accuracy,\nwe have checked that the numerical\nimpact of the difference in its implementation is negligible.\nMoreover, the set of non-logarithmic (in $N$ or $\\bar N$) terms collected\nin the perturbative hard and soft functions in Eqs.~\\ref{b:kernelmellin},%\n~\\ref{eq:res:fact:dqcd} begin to differ at $\\O (\\alphas^2)$,\nwhat corresponds to differences of order N$^3$LL and higher.\n'
+assert TeXFormatter(s) == '\nWe have checked analytically that with this\nchoice of scales in the SCET expressions,\nthey agree with the dQCD expressions up to the\nhigher order logarithmic terms in dQCD, as explained below.\nThese terms originate from various sources.\nTo start with,\nin SCET any ratio of scales of the form $\\ln \\mu_i / \\mu_j$ is counted as large,\nwhere $\\mu_i \\in \\{\\muF, \\muR, \\mu_s, \\mu_h\\}$.\nThis implies, for instance, that in the SCET formulas in the Mellin-space which\nare used here corrections logarithmic in\n$ \\bar N = N e^{\\gamma_E}$ are resummed.\nInstead, the particular formulation of the dQCD\nexpressions presented insection~\\ref{sec:theo-nnllk}, resums $\\ln N$ terms,\nwith additional terms involving $\\gamma_E$ included up to the NNLL accuracy.\nAnother difference stems from the treatment of the $\\exp (\\alphas g_3)$ term:\nwhile in dQCD it is fully included,\nin SCET its expansion up to $\\O (\\alphas)$ is considered.\nAlthough technically this term is of the NNLL accuracy,\nwe have checked that the numerical\nimpact of the difference in its implementation is negligible.\nMoreover, the set of non-logarithmic (in $N$ or $\\bar N$)\nterms collected in the perturbative hard\nand soft functions in Eqs.~\\ref{b:kernelmellin},%\n~\\ref{eq:res:fact:dqcd} begin to differ at $\\O (\\alphas^2)$,\nwhat corresponds to differences of order N$^3$LL and higher.\n'
 
 # 31
 s = r'''
 The jet functions $\Delta^i$ account for (soft-)collinear logarithmic contributions from the initial state partons and are well known at NNLL~\cite{Catani:1996yz,Catani:2003zt}.  The term $\mathbf{\bar{U}}_R\,\mathbf{\tilde S}_R \, \mathbf{{U}}_R$ originates from a solution of the renormalization group equation for the soft function and consists of the evolution matrices $\mathbf{\bar{U}}_R$, $\mathbf{{U}}_R$, as well as the function $\mathbf{\tilde S}_R$ which plays the role of a boundary condition of the renormalization group equation. The evolution matrices are given by (reverse in the case of $\mathbf{\bar{U}}_R$) path-ordered exponentials of the soft anomalous dimension matrix {$\mathbf{\bar \Gamma}_{ij\tosv \tth}(\alphas)= \left(\frac{\alphas}{\pi}\right) \mathbf{\bar \Gamma}^{(1)}_{ij\tosv \tth} +\left(\frac{\alphas}{\pi}\right)^2 \mathbf{\bar \Gamma}^{(2)}_{ij\tosv \tth}+\ldots$} which is obtained by subtracting the contributions already taken into account in $\Delta^i \Delta^j$ from the full soft anomalous dimension for the process $ij \to \tth$.   At NLL, the path-ordered exponentials collapse to standard exponential factors in the colour space $\mathbf R$ where $\mathbf \Gamma^{(1)}_R$  is diagonal.  At NNLL, the  path-ordered exponentials are eliminated by treating $\mathbf{U}_R$ and  $\mathbf{\bar{U}}_R$  perturbatively
 '''
-assert TeXFormatter(s) == '\nThe jet functions $\\Delta^i$ account for (soft-)collinear\nlogarithmic contributions from the initial state partons and\nare well known at NNLL~\\cite{Catani:1996yz, Catani:2003zt}.\nThe term $\\mathbf{\\bar{U}}_R \\, \\mathbf{\\tilde S}_R \\, \\mathbf{{U}}_R$\noriginates from a solution of the\nrenormalization group equation for the soft function and\nconsists of the evolution matrices $\\mathbf{\\bar{U}}_R$,\n$\\mathbf{{U}}_R$, as well as the function $\\mathbf{\\tilde S}_R$\nwhich plays the role of a boundary\ncondition of the renormalization group equation.\nThe evolution matrices are given by\n(reverse in the case of $\\mathbf{\\bar{U}}_R$)\npath-ordered exponentials of the soft anomalous dimension matrix {%\n    $\n        \\mathbf{\\bar \\Gamma}_{ij \\tosv \\tth}(\\alphas)\n        = \\left(\\frac{\\alphas}{\\pi}\\right)\n        \\mathbf{\\bar \\Gamma}^{(1)}_{ij \\tosv \\tth}\n        + \\left(\\frac{\\alphas}{\\pi}\\right)^2\n        \\mathbf{\\bar \\Gamma}^{(2)}_{ij \\tosv \\tth}\n        + \\ldots\n    $%\n} which is obtained by subtracting the contributions\nalready taken into account in $\\Delta^i \\Delta^j$\nfrom the full soft anomalous dimension for the process $ij \\to \\tth$.\nAt NLL, the path-ordered exponentials collapse to standard\nexponential factors in the colour space\n$\\mathbf R$ where $\\mathbf \\Gamma^{(1)}_R$ is diagonal.\nAt NNLL,\nthe path-ordered exponentials are eliminated by treating $\\mathbf{U}_R$ and\n$\\mathbf{\\bar{U}}_R$ perturbatively\n'
+assert TeXFormatter(s) == '\nThe jet functions $\\Delta^i$ account for (soft-)collinear\nlogarithmic contributions from the initial state partons\nand are well known at NNLL~\\cite{Catani:1996yz, Catani:2003zt}.\nThe term $\\mathbf{\\bar{U}}_R \\, \\mathbf{\\tilde S}_R \\, \\mathbf{{U}}_R$\noriginates from a solution of the\nrenormalization group equation for the soft function\nand consists of the evolution matrices $\\mathbf{\\bar{U}}_R$,\n$\\mathbf{{U}}_R$, as well as the function $\\mathbf{\\tilde S}_R$\nwhich plays the role of a boundary\ncondition of the renormalization group equation.\nThe evolution matrices are given by\n(reverse in the case of $\\mathbf{\\bar{U}}_R$)\npath-ordered exponentials of the soft anomalous dimension matrix {%\n    $\n        \\mathbf{\\bar \\Gamma}_{ij \\tosv \\tth}(\\alphas)\n        = \\left(\\frac{\\alphas}{\\pi}\\right)\n        \\mathbf{\\bar \\Gamma}^{(1)}_{ij \\tosv \\tth}\n        + \\left(\\frac{\\alphas}{\\pi}\\right)^2\n        \\mathbf{\\bar \\Gamma}^{(2)}_{ij \\tosv \\tth}\n        + \\ldots\n    $%\n} which is obtained by subtracting the contributions\nalready taken into account in $\\Delta^i \\Delta^j$\nfrom the full soft anomalous dimension for the process $ij \\to \\tth$.\nAt NLL, the path-ordered exponentials collapse to standard\nexponential factors in the colour space\n$\\mathbf R$ where $\\mathbf \\Gamma^{(1)}_R$ is diagonal.\nAt NNLL,\nthe path-ordered exponentials are eliminated by treating $\\mathbf{U}_R$\nand $\\mathbf{\\bar{U}}_R$ perturbatively\n'
 
 # 34
 s = r'''
@@ -1084,26 +1164,12 @@ s = r'''
 assert TeXFormatter(s) == '\n\\begin{equation} \\label{eq:diffeqn}\n    \\dv{K(\\alpha_S)}{\\alpha_S}\n    - \\frac{1}{2 \\pi \\alpha_S b_0} \\comm{K(\\alpha_S)}{\\Gamma^{(1)}}\n    = \\left(\n        \\frac{\\Gamma(\\alpha_S)}{\\beta(\\alpha_S)}\n        + \\frac{\\Gamma^{(1)}}{2 \\pi \\alpha_S b_0}\n    \\right) K(\\alpha_S)\n\\end{equation}\n'
 
 s = r'''
-Now, equating both derivatives and using equation \eqref{eq:Kmatrix} for $U$ we arrive at the following equation:
-\begin{equation*}
-    \frac{\Gamma(\alpha_S)}{\beta(\alpha_S)}K(\alpha_S)
-    = \dv{K(\alpha_S)}{\alpha_S} - K(\alpha_S)\frac{\Gamma^{(1)}}{2\pi\alpha_Sb_0}
-\end{equation*}
-'''
-assert TeXFormatter(s) == '\nNow, equating both derivatives and\nusing equation \\eqref{eq:Kmatrix} for $U$ we arrive at the following equation:\n\\begin{equation*}\n    \\frac{\\Gamma(\\alpha_S)}{\\beta(\\alpha_S)} K(\\alpha_S)\n    = \\dv{K(\\alpha_S)}{\\alpha_S}\n    - K(\\alpha_S) \\frac{\\Gamma^{(1)}}{2 \\pi \\alpha_S b_0}\n\\end{equation*}\n'
-
-s = r'''
 \begin{equation*}
     \dv{U(\mu, \mu_0)}{\mu} = \dv{\alpha_S(\mu^2)}{\mu}\frac{\Gamma(\alpha_S(\mu^2))}{\beta(\alpha_S(\mu^2))}\Pexp{\int_{\alpha_S(\mu^2_0)}^{\alpha_S(\mu^2)} \frac{\Gamma(\alpha_S)}{\beta(\alpha_S)}\dd{\alpha_S}}
     = \dv{\alpha_S(\mu^2)}{\mu}\frac{\Gamma(\alpha_S(\mu^2))}{\beta(\alpha_S(\mu^2))}U(\mu, \mu_0)
 \end{equation*}
 '''
 assert TeXFormatter(s) == '\n\\begin{equation*}\n    \\dv{U(\\mu, \\mu_0)}{\\mu}\n    = \\dv{\\alpha_S(\\mu^2)}{\\mu}\n    \\frac{\\Gamma(\\alpha_S(\\mu^2))}{\\beta(\\alpha_S(\\mu^2))} \\Pexp{\n        \\int_{\\alpha_S(\\mu^2_0)}^{\\alpha_S(\\mu^2)}\n        \\frac{\\Gamma(\\alpha_S)}{\\beta(\\alpha_S)} \\dd{\\alpha_S}\n    }\n    = \\dv{\\alpha_S(\\mu^2)}{\\mu}\n    \\frac{\\Gamma(\\alpha_S(\\mu^2))}{\\beta(\\alpha_S(\\mu^2))} U(\\mu, \\mu_0)\n\\end{equation*}\n'
-
-s = '''
-However, the consequence is that the non-radiative amplitude in the r.h.s. of eq. \\eqref{eq:NLP} is evaluated using the momenta $p$, which are unphysical for this process, because $\\sum \\eta_i p_i \\neq 0$. This might seem problematic because an amplitude is intrinsically defined for physical momenta, and it is not uniquely defined for unphysical momenta. Therefore, the value of $\\mathcal{H}(p)$ is ambiguous, which translates into an ambiguity on $\\mathcal{A}(p, k)$ and thus seems to invalidate eq. \\eqref{eq:NLP}. The argument, however, is not entirely correct, as shown in \\cite{Balsach:2023ema}. Indeed, although an ambiguity is present, it only affects the NNLP terms.
-'''
-assert TeXFormatter(s) == '\nHowever,\nthe consequence is that the non-radiative amplitude in the r.h.s. of eq.\n\\eqref{eq:NLP} is evaluated using the momenta $p$,\nwhich are unphysical for this process, because $\\sum \\eta_i p_i \\neq 0$.\nThis might seem problematic because an amplitude is\nintrinsically defined for physical momenta,\nand it is not uniquely defined for unphysical momenta.\nTherefore, the value of $\\mathcal{H}(p)$ is ambiguous,\nwhich translates into an ambiguity on $\\mathcal{A}(p, k)$ and\nthus seems to invalidate eq. \\eqref{eq:NLP}.\nThe argument, however, is not entirely correct,\nas shown in \\cite{Balsach:2023ema}.\nIndeed, although an ambiguity is present, it only affects the NNLP terms.\n'
 
 s = r'''
 In order to evolve the soft matrix $S$ from a scale $\mu_0$ to a soft scale
