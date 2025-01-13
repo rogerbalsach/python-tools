@@ -215,6 +215,8 @@ class TeXFormatter:
                 self._context.append('equation')
             elif 'document' in line or 'figure' in line:
                 self._context.append('text')
+            elif 'verbatim' in line:
+                self._context.append('verbatim')
             else:
                 from warnings import warn
                 warn(f'unknown environment: {line}')
@@ -250,6 +252,9 @@ class TeXFormatter:
                 indent = (len(line) - len(line.lstrip())) // 4 * 4
                 cmt = ''
             self.indent = cmt + ' ' * indent
+            self.update_context(line)
+            if self.context == 'verbatim':
+                continue
             line = self.indent + line.lstrip(' %')
             # Remove double spaces (except for the indent)
             while '  ' in line[indent:]:
@@ -267,7 +272,6 @@ class TeXFormatter:
                     new_line = self.indent + line[idx:]
                     line = line[:idx]
                     lines.insert(i+1, new_line)
-            self.update_context(line)
             offset = len(self.indent)
             self.indent = ''
             if self.context == 'equation':
@@ -318,8 +322,8 @@ class TeXFormatter:
             add_space.append(self.get_index_line(match.end(), line) - 1)
         self.indent = ''
         for (start, end), char in parenthesis:
-            start = start or 0
-            if not start:
+            start = -1 if start is None else start
+            if start < 1:
                 self.indent = ''
             if char == '{':
                 if pattern_context.search(line[:start]):
@@ -392,30 +396,35 @@ class TeXFormatter:
             elif (match := re.search(r'(?<!\\)%(?!$)', line)):
                 self.commentafter = match.start()
             if line.replace('$$', '$').count('$') % 2 == 1:
-                if (self.context == 'text'
-                        and ('$' not in self.multline_parenthesis
-                             or line.strip()[0] != '$')
-                        and line.partition('%')[0].strip()[-1] != '$'):
-                    assert '$' not in self.multline_parenthesis, line
-                    idx = line[::-1].find('$')
-                    new_content.extend(self.format_tex([line[:-idx]]))
-                    self._context.append('equation')
-                    new_content.extend(self.format_tex(
-                        [self.indent + 4*' ' + line[-idx:].lstrip()]
-                    ))
-                    continue
+                if self.context == 'text':
+                    line_wo_comment = line.partition('%')[0].strip()
+                    if not line_wo_comment:
+                        # Line is a comment
+                        line_wo_comment = line.partition('%')[-1].strip()
+                    if (('$' not in self.multline_parenthesis
+                         or line_wo_comment.strip()[0] != '$')
+                            and line_wo_comment[-1] != '$'):
+                        assert '$' not in self.multline_parenthesis, line
+                        idx = line[::-1].find('$')
+                        new_content.extend(self.format_tex([line[:-idx]]))
+                        self._context.append('equation')
+                        new_content.extend(self.format_tex(
+                            [self.indent + 4*' ' + line[-idx:].lstrip()]
+                        ))
+                        continue
                 elif self.context == 'equation':
                     idx = line.find('$')
-                    if idx > 0:
+                    if idx > len(self.indent):
                         new_content.extend(self.format_tex([line[:idx]]))
                     self._context.pop()
                     # if '$' in self.multline_parenthesis:
                     #     assert self.multline_parenthesis[-1] == '$'
                     #     self.multline_parenthesis = self.multline_parenthesis[:-1]
-                    new_content.extend(self.format_tex([line[idx:]]))
+                    new_content.extend(self.format_tex([self.indent
+                                                        + line[idx:]]))
                     continue
             # If line is shoft enough, leave it as it is
-            if len(line) <= 80:
+            if len(line) <= 80 or self.context == 'verbatim':
                 if not first and self.context == 'equation':
                     # TODO: If previous lines were splitted, check that all
                     # TODO: operations here have lower priority. For example,
@@ -473,6 +482,7 @@ class TeXFormatter:
             # why does the first need to be alnum?
             # if not first[-1].isalnum() and second[0] in {'.', ','}:
             if (second.lstrip(' %')[0] in {'.', ','}
+                and first.strip()[-1] != ','
                     or first.strip()[-1] == '%' and first.strip()[-2] != '\\'):
                 space = ''
             match = re.search(r'^(.*?)(\s|(?<!\\)%)*$', first)
@@ -568,7 +578,7 @@ class TeXFormatter:
         skeleton, parenthesis = self.get_skeleton(line,
                                                   self.multline_parenthesis)
         if self.commentafter < len(line):
-            new_lines = [line[:self.commentafter], line[self.commentafter:]]
+            new_lines = [line[:self.commentafter+1], line[self.commentafter:]]
             return self.format_tex(new_lines)
         # Split newlines into a new line
         pattern = re.compile(r'(\\\\|\\newline)(?=.)')
@@ -610,7 +620,7 @@ class TeXFormatter:
             end = _end if _end is not None else len(line)
             if end - start > 40 and char == '{':
                 pass
-            elif end - start > 75 and char == '(':
+            elif end - start > 75 and char in '([':
                 pass
             else:
                 continue
@@ -635,7 +645,10 @@ class TeXFormatter:
 
     def _format_equation(self, line: str) -> list[str]:
         skeleton, _ = self.get_skeleton(line, self.multline_parenthesis)
-        # If equation separator (quad) or equality is present, split line.
+        # Split label into own line
+        if r'\label' in line:
+            return self.line_split(line, r'\\label', keep='second')
+        # If equation separator (quad), split line.
         if pattern_separate.search(skeleton):
             return self.line_split(line, pattern_separate, keep=True)
         # Split line in implication
@@ -692,7 +705,7 @@ class TeXFormatter:
                     if end == len(self.indent):
                         continue
                 new_lines = [
-                    self.indent + 4*' ' + line[:end].strip() + '\n',
+                    self.indent + 4*' ' + line[:end].strip('% ') + '\n',
                     self.indent + line[end:].rstrip() + '\n'
                 ]
             elif end is None and start + 2 < len(line.rstrip()):
@@ -813,19 +826,25 @@ class TeXFormatter:
             return repr(self) == other
         return NotImplemented
 
-def run_from_command() -> None:
+def format_files(*names: str | pathlib.PosixPath) -> None:
     pathdir = pathlib.Path.cwd()
-    filename = pathdir / pathlib.Path(sys.argv[1])
-    print(filename)
-    dest = pathdir / pathlib.Path(sys.argv[1])
-    with filename.open() as file:
-        content = file.readlines()
-    new_content = TeXFormatter(content).formatted_lines
-    with dest.open('w') as file:
-        file.writelines(new_content)
+    for name in names:
+        filename = pathdir / pathlib.Path(name)
+        print(filename)
+        dest = pathdir / pathlib.Path(name)
+        with filename.open() as file:
+            content = file.readlines()
+        try:
+            new_content = TeXFormatter(content).formatted_lines
+        except Exception as e:
+            err_msg = 'Exception encountered when formatting the file '
+            err_msg += f'{filename}: {e}'
+            raise type(e)(err_msg).with_traceback(e.__traceback__) from None
+        with dest.open('w') as file:
+            file.writelines(new_content)
 
 
-def run_from_editor() -> None:
+def format_string() -> None:
     s = r'''
 '''
     r = TeXFormatter(s)
@@ -835,6 +854,7 @@ def run_from_editor() -> None:
 if __name__ == '__main__':
     try:
         __IPYTHON__
-        run_from_editor()
+        format_string()
     except NameError:
-        run_from_command()
+        _, *names = sys.argv
+        format_files(*names)

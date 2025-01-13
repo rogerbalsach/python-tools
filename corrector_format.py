@@ -25,6 +25,9 @@ def string_format(s):
         next_line = False
         line = line.strip()
         line = line.replace(r'\\', ' ').replace(r'\newline', '')
+        if not line:
+            new_s += '\n'
+        line, *_ = line.partition('%')
         if not line: continue
         for match in begin_pattern.finditer(line):
             env.append(match.group(1))
