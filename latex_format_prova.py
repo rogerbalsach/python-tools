@@ -361,16 +361,19 @@ class TeXFormatter:
                                  ) -> list[int]:
         add_space = []
         # Add a space before an operation, unless preceeded
-        # by a parenthesis or exponent (^)
-        for match in re.finditer(r'([^\s\(\[\{\^])[\+\-/=\<\>]', line):
+        # by a parenthesis or exponent (^) or underscore (_)
+        for match in re.finditer(r'([^\s\(\[\{\^_])[\+\-/=\<\>]', line):
             if not match.group(1) == ' ':
                 add_space.append(offset + match.start(1) + 1)
             else:
                 assert False
         # Add a space after an operation if not preceded by parenthesis
         # or followed by EOL.
-        for match in re.finditer(r'[^\{\(\[](\+|/|=|\\neq|\-|\<)(?!\s|$)',
+        for match in re.finditer(r'[^\{\(\[\^_](\+|/|=|\\neq|\-|\<)(?!\s|$)',
                                  line):
+            # Do not add space between underscore and superscore.
+            if {line[match.start()], line[match.end()]} == {'^', '_'}:
+                continue
             add_space.append(offset + match.end())
         return add_space
 
@@ -537,7 +540,7 @@ class TeXFormatter:
             start = self.get_index_line(match.start(), line)
             end = self.get_index_line(match.end(), line)
             sEOL = eEOL = '%' if self.context == 'text' else ''
-            if end == len(line) or line[end] == ' ':
+            if end == len(line) or line[end] == ' ' or line[end-1] == ' ':
                 eEOL = ''
             if line[start-1] == ' ' or line[start] == ' ':
                 sEOL = ''
@@ -556,8 +559,8 @@ class TeXFormatter:
                 prev_idx = end
         lines.append(line[prev_idx:])
         lines = [line for line in lines if line.strip(' %')]
-        new_lines = map(lambda s: self.indent + s.lstrip(' %').rstrip() + '\n',
-                        lines)
+        new_lines = [self.indent + s.lstrip(' %').rstrip() + '\n'
+                     for s in lines]
         return self.format_tex(new_lines)
 
     def get_index_line(self, idx: int, line: str) -> int:
@@ -599,7 +602,8 @@ class TeXFormatter:
             return self.line_split(line, r'(?<=\s)and(?=\s)', keep='second')
         # Split the formulas into a new line.
         new_lines = []
-        if skeleton == '$$':
+        pattern = re.compile(r'\$\$[\.\,]?')
+        if pattern.match(skeleton):
             start = self.get_index_line(0, line)
             end = self.get_index_line(1, line)
             new_lines.append(line[:start+1].rstrip() + '\n')
@@ -612,8 +616,9 @@ class TeXFormatter:
             # TODO?: Add % after last $.
             new_lines.append(indent + line[end:].strip() + '\n')
             return [line for line in new_lines if line]
-        if ' $$' in skeleton:
-            return self.line_split(line, r'\s\$\$', keep=True)
+        pattern = re.compile(r'\s\$\$[\s\.\,]\s?')
+        if pattern.search(skeleton):
+            return self.line_split(line, pattern, keep=True)
         # Split {} into multiple lines
         for (_start, _end), char in parenthesis:
             start = _start+1 if _start is not None else 0
@@ -661,12 +666,15 @@ class TeXFormatter:
         ret = self.check_unmatched_parenthesis(line)
         if ret is not None:
             return ret
+        # Split commas
+        if ';' in skeleton:
+            return self.line_split(line, ';', keep='first')
         # Split sums and subtractions into multiple lines
         ret = self.split_sums(line)
         if ret is not None:
             return ret
         # Split parenthesis into multiple lines if they are big enough.
-        ret = self.split_large_parenthesis(line)
+        ret = self.split_long_parenthesis(line)
         if ret is not None:
             return ret
         # Split the spaces of skeleton
@@ -685,8 +693,7 @@ class TeXFormatter:
         new_lines = []
         prev_idx = 0
         # TODO: Handle cases like \cong - 3, etc.
-        # This should be done easier with new python 3.11 re functions.
-        for match in re.finditer(r'[^=\s&]\s*(\+|\-)', skeleton):
+        for match in re.finditer(r'[^=\s\^_]\s*(\+|\-)', skeleton):
             idx_s = match.start(1)
             idx_l = self.get_index_line(idx_s, line)
             new_lines.append(self.indent + line[prev_idx:idx_l].lstrip(' %'))
@@ -717,29 +724,44 @@ class TeXFormatter:
                 continue
             return self.format_tex(new_lines)
 
-    def split_large_parenthesis(self, line: str) -> Optional[list[str]]:
+    def split_long_parenthesis(self, line: str) -> Optional[list[str]]:
         parenthesis = self._find_parenthesis(line, self.multline_parenthesis)
+        maxlength = 30
+        split_start, split_end = None, None
+
+        # Find the longest parenthesis that exceeds the threshold
         for (start, end), _ in parenthesis:
-            if end is None or start is None or end - start < 30:
+            if end is None or start is None or end - start < maxlength:
                 continue
-            if pattern_context.search(line[:start]):
-                indent = self.indent
-                new_lines = [line[:start + 1] + '%\n']
-                self._context.append('text')
-                new_lines += self.format_tex(
-                    [self.indent + 4*' ' + line[start+1:end].lstrip() + '%\n']
-                )
-                self._context.pop()
-                new_lines += [indent + line[end:] + '\n']
-                return self.format_tex(new_lines)
-            if (match := re.search(r'\\(right|[bB]igg?)\s?\\?$', line[:end])):
-                end = match.start()
-            new_lines = [
-                line[:start + 1] + '\n',
-                self.indent + 4*' ' + line[start+1:end].lstrip() + '\n',
-                self.indent + line[end:] + '\n'
-            ]
+            split_start, split_end = start, end
+            maxlength = end - start
+        # If no long parenthesis exists, return None
+        if split_start is None:
+            return
+        # Check if there is a label or text context and handle it as text.
+        if pattern_context.search(line[:split_start]):
+            indent = self.indent
+            new_lines = [line[:split_start + 1] + '%\n']
+            self._context.append('text')
+            new_lines += self.format_tex(
+                [self.indent + 4*' '
+                 + line[split_start+1:split_end].lstrip() + '%\n']
+            )
+            self._context.pop()
+            new_lines += [indent + line[split_end:] + '\n']
             return self.format_tex(new_lines)
+        # Ajust the end for large parenthesis
+        if (match := re.search(r'\\(right|[bB]igg?)\s?\\?$',
+                               line[:split_end])):
+            split_end = match.start()
+
+        new_lines = [
+            line[:split_start + 1] + '\n',
+            self.indent + 4*' '
+            + line[split_start+1:split_end].lstrip() + '\n',
+            self.indent + line[split_end:] + '\n'
+        ]
+        return self.format_tex(new_lines)
 
     def split_after_parenthesis(self, line: str) -> Optional[list[str]]:
         parenthesis = self._find_parenthesis(line, self.multline_parenthesis)
