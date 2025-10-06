@@ -15,9 +15,19 @@ from typing import Optional, Union
 
 import numpy as np
 
+# TODO:
+#   - Fix phantoms
+#   - Fix aligned blocks
+#   - Format also missing {} after _ and ^?
+#   - Change [b|B]ig? to the l/r versions (e.g big -> bigl or bigr)
+#   - Change the =& align to ={}& for correct space.
+#   - Have a limit for non-comments 1 character smaller than commented ones.
+
+LINE_LENGTH = 80
+
 separate_list = [r'\\quad', r'\\qquad']
 arrow_list = [r'\\to', r'\\xrightarrow(\[.*?\])?\{.*?\}', r'\\Longrightarrow']
-equal_list = ['=', r'\\equiv', r'\\cong', r'\\neq']
+equal_list = ['=', r'\\equiv', r'\\cong', r'\\neq', r'\\geq', r'\\leq']
 # A backslash is allowed after these characters without space
 backslash_prefactor = [r'\(', r'\[', r'\{', r'\s', r'\$', r'\^', r'\\', r'\-',
                        r'\|', '_', '%']
@@ -35,13 +45,7 @@ pattern_context = re.compile(rf'({"|".join(context_list)})$')
 
 
 ParenthesisType = dict[
-    tuple[
-        Union[
-            tuple[Optional[int], int],
-            tuple[int, Optional[int]]
-        ],
-        str
-    ],
+    tuple[tuple[int | None, int] | tuple[int, int | None], str],
     'ParenthesisType'
 ]
 
@@ -49,6 +53,8 @@ ParenthesisType = dict[
 class Parenthesis():
     OPEN_PARENTHESIS = '([{'
     CLOSE_PARENTHESIS = ')]}'
+    unmatched_parenthesis: str
+    levels: list[tuple[int, str]]
 
     def __init__(self) -> None:
         self.current_struct: ParenthesisType = {}
@@ -59,6 +65,45 @@ class Parenthesis():
         self.current_struct[((idx, None), char)] = {}
         self.current_struct = self.current_struct[((idx, None), char)]
 
+    def close_parenthesis(self, idx: int, char: str) -> None:
+        if self.levels:
+            # Check if this closes the previous open parenthesis
+            start, schar = self.levels.pop()
+            if schar == '$':
+                valid = self.process_end_equation(char, idx, start)
+                if not valid:
+                    self.levels.append((start, '$'))
+                    return
+            elif not self.match(char, schar):
+                # PARENTHESIS NOT MATCHING!
+                # Add previous level back untouched and process this
+                # parenthesis in a special way.
+                self.levels.append((start, schar))
+                start, schar = self.process_not_match(idx, char, start)
+                if not schar:
+                    return
+            elif char == '}':
+                if self.is_escaped(idx):
+                    idx -= 1
+        else:
+            if self.unmatched_parenthesis:
+                escaped = self.process_unmatched(char)
+                if escaped:
+                    return
+                self.unmatched_parenthesis = self.unmatched_parenthesis[:-1]
+            # Why we need the escape ")"?
+            elif char == ')' or char == 'END':
+                return
+            elif char == '}':
+                if self.is_escaped(idx):
+                    idx -= 1
+            schar = self.get_match(char)
+            self.parenthesis_structure = {
+                ((None, idx), schar): self.parenthesis_structure}
+            self.current_struct = self.parenthesis_structure
+            return
+        self.current_struct = self.update_structure(start, schar, idx)
+
     @classmethod
     def get_match(cls, char: str) -> str:
         if char in cls.OPEN_PARENTHESIS:
@@ -67,7 +112,9 @@ class Parenthesis():
             return cls.OPEN_PARENTHESIS[cls.CLOSE_PARENTHESIS.index(char)]
         elif char == '$':
             return char
-        raise ValueError()
+        elif char == 'BEGIN':
+            return 'END'
+        raise ValueError(f'char not valid: {char}')
 
     @classmethod
     def match(cls, first: str, second: str) -> bool:
@@ -86,10 +133,27 @@ class Parenthesis():
     def process_not_match(self, idx: int, char: str, start: int
                           ) -> tuple[int, str]:
         if char == ')':
-            # Assume that ) is not part of a parenthesis
+            # Assume that ) is not part of a parenthesis. Just ignore this and
+            # continue parsing the parenthesis
             return start, ''
-        # Check its not a phantom context
+        # Check whether we are in a phantom context.
+        if 'p' in self.unmatched_parenthesis:
+            # We are in a phantom context open in a previous line.
+            if char != '}':
+                # Ignore error
+                return start, ''
+            # We are closing the phantom from the previous line.
+            # TODO: The closing parentheis need not be closing the phantom.
+            # I should add a check and decide what to do in that case.
+            start, schar = self.levels[0]
+            self.parenthesis_structure.pop(((start, None), schar))
+            self.current_struct = self.parenthesis_structure
+            self.parenthesis_structure = {((None, idx), '{'):
+                                          self.current_struct}
+            self.levels = []
+            return start, ''
         while self.levels:
+            # Ignore all levels that are not "{" type.
             start, schar = self.levels.pop()
             if schar == '{' and not self.is_escaped(start):
                 break
@@ -102,8 +166,8 @@ class Parenthesis():
         self.levels.append((start, schar))
         return start, ''
 
-    def process_unmatched(self, unmatched_parenthesis: str, char: str) -> bool:
-        schar = unmatched_parenthesis[-1]
+    def process_unmatched(self, char: str) -> bool:
+        schar = self.unmatched_parenthesis[-1]
         if not self.match(schar, char):
             if char == ')':
                 return True
@@ -119,13 +183,21 @@ class Parenthesis():
 
     def parse(self, line: str, unmatched_parenthesis: str) -> ParenthesisType:
         self.line = line
+        self.unmatched_parenthesis = unmatched_parenthesis
         self.in_equation = '$' in unmatched_parenthesis
         self.parenthesis_structure = {}
         self.levels: list[tuple[int, str]] = []
         self.current_struct = self.parenthesis_structure
 
-        for idx, char in enumerate(line):
-            if char in self.OPEN_PARENTHESIS:
+        valid_str = '\\$' + self.OPEN_PARENTHESIS + self.CLOSE_PARENTHESIS
+        for idx, char in ((i, c) for i, c in enumerate(line)
+                          if c in valid_str):
+            if char == '\\':
+                if line[idx+1:idx+7] == 'begin{':
+                    self.add_open_brace(idx + 6, 'BEGIN')
+                elif line[idx+1:idx+5] == 'end{':
+                    self.close_parenthesis(idx, 'END')
+            elif char in self.OPEN_PARENTHESIS:
                 self.add_open_brace(idx, char)
 
             elif char == '$' and not self.in_equation:
@@ -135,40 +207,7 @@ class Parenthesis():
                 self.in_equation = True
 
             elif char in self.CLOSE_PARENTHESIS + '$':
-                if self.levels:
-                    start, schar = self.levels.pop()
-                    if schar == '$':
-                        valid = self.process_end_equation(char, idx, start)
-                        if not valid:
-                            self.levels.append((start, '$'))
-                            continue
-                    elif not self.match(char, schar):
-                        self.levels.append((start, schar))
-                        start, schar = self.process_not_match(idx, char, start)
-                        if not schar:
-                            continue
-                    elif char == '}':
-                        if self.is_escaped(idx):
-                            idx -= 1
-                else:
-                    if unmatched_parenthesis:
-                        escaped = self.process_unmatched(unmatched_parenthesis,
-                                                         char)
-                        if escaped:
-                            continue
-                        unmatched_parenthesis = unmatched_parenthesis[:-1]
-                    elif char == ')':
-                        continue
-                    elif char == '}':
-                        if self.is_escaped(idx):
-                            idx -= 1
-                    schar = self.get_match(char)
-                    self.parenthesis_structure = {
-                        ((None, idx), schar): self.parenthesis_structure
-                    }
-                    self.current_struct = self.parenthesis_structure
-                    continue
-                self.current_struct = self.update_structure(start, schar, idx)
+                self.close_parenthesis(idx, char)
         while self.levels:
             start, schar = self.levels.pop()
             self.current_struct = self.update_structure(start, schar, None)
@@ -191,10 +230,16 @@ class Parenthesis():
 # TODO: Add CLI interface
 # TODO: Implement read from file properly
 class TeXFormatter:
-    def __init__(self, content: Union[str, list[str]]) -> None:
+    eq_envs = ('equation', 'align', 'eqnarray', 'gather')
+    txt_envs = ('document', 'figure', 'itemize')
+
+    def __init__(self, content: Union[str, list[str]], *, reset: bool = False
+                 ) -> None:
         if isinstance(content, str):
             content = content.splitlines(keepends=True)
         self.init_string = content.copy()
+        if reset:
+            content = [' '.join([line.strip() for line in content]).strip()]
         self.reset_context()
         self.multline_parenthesis = ''
         self.indent = ''
@@ -208,12 +253,10 @@ class TeXFormatter:
     def update_context(self, line: str) -> None:
         if any(x in line for x in def_list):
             return
-        # if self.context == 'text' and '$' in self.multline_parenthesis:
-        #     self._context.append('equation')
         if r'\begin' in line:
-            if 'equation' in line or 'align' in line or 'eqnarray' in line:
+            if any(word in line for word in self.eq_envs):
                 self._context.append('equation')
-            elif 'document' in line or 'figure' in line:
+            elif any(word in line for word in self.txt_envs):
                 self._context.append('text')
             elif 'verbatim' in line:
                 self._context.append('verbatim')
@@ -232,20 +275,21 @@ class TeXFormatter:
         self._context = ['text']
 
     def _format_spaces(self, lines: list[str]) -> list[str]:
+        #TODO: Format also missing {} after _ and ^?
         for i, line in enumerate(lines):
             # Replate all tabs by spaces
-            line = line.expandtabs(4)
+            line = line.replace('\t', '    ')
             # Calculate the indent of the line, remove spaces in the beginning
             # of the line.
             if line.lstrip().startswith('%%% '):
                 # Emacs local variable definition.
                 indent = 0
                 cmt = '%%% '
-            elif line.lstrip().startswith('%%%%'):
+            elif line.lstrip().startswith('%%'):
                 # Long comment. Keep it as is
                 continue
             elif line.lstrip().startswith('%'):
-                # Line is a comment
+                # Line is commented code
                 indent = (len(line[1:]) - len(line.lstrip(' %'))) // 4 * 4
                 cmt = '%'
             else:
@@ -264,20 +308,24 @@ class TeXFormatter:
             line = re.sub(r',(?!\s|~|\\footnote)', r', ', line)
             # Move "begin" commands to a new line.
             # TODO: The check for "def" commands should be better.
-            if (r'\begin' in line.strip(' %')[6:]
-                    and all(x not in line for x in def_list)):
-                idx = line.index(r'\begin')
-                if not ((match := re.search(r'(?<!\\)%', line))
-                        and match.start() < idx):
-                    new_line = self.indent + line[idx:]
-                    line = line[:idx]
-                    lines.insert(i+1, new_line)
+            # if (r'\begin' in line.strip(' %')[6:]
+            #         and all(x not in line for x in def_list)):
+            #     idx = line.index(r'\begin')
+            #     if not ((match := re.search(r'(?<!\\)%', line))
+            #             and match.start() < idx):
+            #         new_line = self.indent + line[idx:]
+            #         line = line[:idx]
+            #         lines.insert(i+1, new_line)
             offset = len(self.indent)
             self.indent = ''
             if self.context == 'equation':
                 add_space = self._equation_addspace(line.lstrip(' %'), offset)
             elif self.context == 'text':
                 add_space = self._text_addspace(line.lstrip(' %'), offset)
+            elif self.context == 'phantom':
+                # Ignore indent inside phantom
+                line = line.strip()
+                add_space = self._phantom_addspace(line.lstrip(' %'), offset)
             # Add all the spaces found previously
             for space_pos in sorted(set(add_space), reverse=True):
                 line = line[:space_pos] + ' ' + line[space_pos:]
@@ -286,10 +334,12 @@ class TeXFormatter:
         return lines
 
     def _equation_addspace(self, line: str, offset: int = 0) -> list[int]:
+        # TODO: Add space in between parenthesis ")("?
         # Find position that need space
         add_space = []
         self.indent = ' ' * (len(line) - len(line.lstrip(' %')))
-        skeleton, parenthesis = self.get_skeleton(line)
+        skeleton, parenthesis = self.get_skeleton(line,
+                                                  self.multline_parenthesis)
         # Add a space before '\' except when following ( [ { $ ^ \ or a space
         # or except when prefacing "right".
         if '\\' in skeleton:
@@ -302,6 +352,8 @@ class TeXFormatter:
         if '&' in skeleton:
             for match in re.finditer(r'[^\\\s]&', skeleton):
                 add_space.append(self.get_index_line(match.start(0), line) + 1)
+            for match in re.finditer(r'&[^\s]', skeleton):
+                add_space.append(self.get_index_line(match.start(), line) + 1)
         # Add a space before and after the + - and / operations.
         if ('+' in skeleton or '-' in skeleton or '/' in skeleton
                 or '=' in skeleton):
@@ -322,7 +374,39 @@ class TeXFormatter:
             add_space.append(self.get_index_line(match.end(), line) - 1)
         self.indent = ''
         for (start, end), char in parenthesis:
-            start = -1 if start is None else start
+            if start is None and self.multline_parenthesis:
+                assert end is not None
+                start = -1
+                if char == '$':
+                    assert skeleton[0] == '$', line
+                    # Equation was opened in a previous line.
+                    # 1. Close equation context
+                    # 2. Remove spaces, they were determined assuming an
+                    # equation enviroment.
+                    self._context.pop()
+                    # Ensure that there is a space after "$"
+                    add_space = []
+                    end2 = end + 2
+                    if line[end+1] != ' ':
+                        end2 = end + 1
+                        add_space = [end2]
+                add_space.extend(self._equation_addspace(line[:end]))
+                self.multline_parenthesis = self.multline_parenthesis[:-1]
+                if char == '$':
+                    # 3. Compute the correct parenthesis for a text
+                    # environment. This needs to be done after
+                    # multline_parenthesis has been updated.
+                    # 4. We can ignore further parenthesis, they should be
+                    # handled in the _text_addspace call.
+                    add_space.extend(self._text_addspace(line[end2:], end2))
+                    break
+                continue
+            assert start is not None
+            if end is None:
+                if char in ('BEGIN'):
+                    self.multline_parenthesis += '{'
+                else:
+                    self.multline_parenthesis += char[0]
             if start < 1:
                 self.indent = ''
             if char == '{':
@@ -330,32 +414,96 @@ class TeXFormatter:
                     add_space.extend(self._text_addspace(line[start+1:end],
                                                          start+1))
                     continue
-            elif char == '$':
-                if end is None:
-                    self._context.pop()
-                continue
+                elif line[start-8:start] == r'\phantom':
+                    # We are entering a phantom environment. If it is contained
+                    # within this line, just ignore the inside. If is spans
+                    # multiple lines, modify the context and multline
+                    # accordingly. The call to _phantom_addspace is to add
+                    # other opening multiline parenthesis. This is needed to
+                    # know when the phantom environment is being closed.
+                    if end is None:
+                        self._context.append('phantom')
+                        self.multline_parenthesis = (
+                            self.multline_parenthesis[:-1] + 'p{'
+                        )
+                        add_space.extend(
+                            self._phantom_addspace(line[start+1:end], start+1)
+                        )
+                    continue
             add_space.extend(self._equation_addspace(line[start+1:end],
                                                      start+1))
         return [offset + n for n in add_space]
 
     def _text_addspace(self, line: str, offset: int = 0) -> list[int]:
         add_space = []
-        list_parenthesis = [
+        parenthesis_stack = [
             self._find_parenthesis(line, self.multline_parenthesis)
         ].copy()
-        while list_parenthesis:
-            parenthesis = list_parenthesis.pop()
+        while parenthesis_stack:
+            parenthesis = parenthesis_stack.pop()
             for ((start, end), char), par in parenthesis.items():
-                if char != '$':
-                    list_parenthesis.append(par)
-                    continue
-                assert start is not None
-                add_space.extend(
-                    self._equation_addspace(line[start+1:end], offset=start+1)
-                )
-                if end is None:
-                    self._context.append('equation')
+                if char == '$':
+                    assert start is not None, line
+                    if end is None:
+                        self.multline_parenthesis += char
+                        self._context.append('equation')
+                    add_space.extend(
+                        self._equation_addspace(line[start+1:end],
+                                                offset=start+1)
+                    )
+                elif char == 'BEGIN':
+                    key = list(par)[0]
+                    # par.pop(key)
+                    senv, eenv = key[0]
+                    assert senv is not None
+                    assert eenv is not None
+                    env = line[senv+1:eenv].strip('*')
+                    if env in self.eq_envs:
+                        add_space.extend(
+                            self._equation_addspace(line[eenv+1:end],
+                                                    offset=eenv+1)
+                        )
+                        if end is None:
+                            self._context.append('equation')
+                    else:
+                        parenthesis_stack.append(par)
+                else:
+                    parenthesis_stack.append(par)
         return [offset + n for n in add_space]
+
+    def _phantom_addspace(self, line: str, offset: int) -> list[int]:
+        parenthesis = self._find_parenthesis(line, self.multline_parenthesis)
+        for p_key in parenthesis:
+            (start, end), char = p_key
+            if start is None:
+                assert end is not None
+                p = parenthesis[p_key]
+                chars = [char]
+                while p:
+                    for (start, end2), char in p:
+                        if start is None:
+                            break
+                    assert end2 is not None
+                    chars.append(char)
+                    p = p[(start, end2), char]
+                for char in reversed(chars):
+                    if char == self.multline_parenthesis[-1]:
+                        self.multline_parenthesis =\
+                            self.multline_parenthesis[:-1]
+                    if self.multline_parenthesis[-1] == 'p':
+                        self.multline_parenthesis =\
+                            self.multline_parenthesis[:-1]
+                        self._context.pop()
+                        return self._equation_addspace(line[end+1:],
+                                                       offset+end+1)
+            if end is None:
+                assert start is not None
+                if char in ('BEGIN'):
+                    self.multline_parenthesis += '{'
+                else:
+                    self.multline_parenthesis += char[0]
+                return self._phantom_addspace(line[start+1:], offset+start+1)
+        return []
 
     def _format_spaces_operation(self, line: str, offset: int = 0
                                  ) -> list[int]:
@@ -390,7 +538,7 @@ class TeXFormatter:
             self.commentafter = len(line)
             # TODO: Manage block separators of thef form %%%% TEXT %%%%
             if set(line.strip()) == {'%'}:
-                new_content.append(line[:79] + '\n')
+                new_content.append(line[:LINE_LENGTH] + '\n')
                 continue
             # TODO: Compute indent from scratch from previous lines.
             if line.strip().startswith('%'):
@@ -398,6 +546,7 @@ class TeXFormatter:
                 self.indent = '%' + ' ' * (level - 1)
             elif (match := re.search(r'(?<!\\)%(?!$)', line)):
                 self.commentafter = match.start()
+            # Handle equation in the middle of the text
             if line.replace('$$', '$').count('$') % 2 == 1:
                 if self.context == 'text':
                     line_wo_comment = line.partition('%')[0].strip()
@@ -426,13 +575,14 @@ class TeXFormatter:
                     new_content.extend(self.format_tex([self.indent
                                                         + line[idx:]]))
                     continue
-            # If line is shoft enough, leave it as it is
-            if len(line) <= 80 or self.context == 'verbatim':
+            # If line is short enough, leave it as it is
+            if len(line) <= LINE_LENGTH or self.context == 'verbatim':
                 if not first and self.context == 'equation':
                     # TODO: If previous lines were splitted, check that all
-                    # TODO: operations here have lower priority. For example,
-                    # TODO: if the previous line splitted sums, and this line
-                    # TODO: contains some sums, we should split them also.
+                    # operations here have lower priority. For example, if the
+                    # previous line splitted sums, and this line contains some
+                    # sums, we should split them also.
+
                     # If there are unmatched parenthesis, split the line anyway
                     ret = self.check_unmatched_parenthesis(line)
                     if ret is not None:
@@ -447,6 +597,8 @@ class TeXFormatter:
                     new_content.extend(self._format_text(line))
                 elif self.context == 'equation':
                     new_content.extend(self._format_equation(line))
+                else:
+                    raise NotImplementedError()
             except Exception as e:
                 print(type(e))
                 print(line)
@@ -461,18 +613,10 @@ class TeXFormatter:
         while len(content) > 1:
             lengths = np.asarray(list(map(len, content)))
             comb_len = lengths[1:] + lengths[:-1]
-            valid_comb = comb_len[(comb_len <= 80) & index_mask]
+            valid_comb = comb_len[(comb_len <= LINE_LENGTH) & index_mask]
             if not valid_comb.size:
                 break
-            # Substitute for?:
-            # idx = np.where(comb_len == min(valid_comb))[0][0]
-            # assert index_mask[idx] is True
-            indices = np.where(comb_len == min(valid_comb))[0]
-            for idx in indices:
-                if index_mask[idx]:
-                    break
-            else:
-                assert False
+            idx = np.where((comb_len == min(valid_comb)) & index_mask)[0][0]
             first = content[idx]
             second = content[idx + 1]
             assert first, first
@@ -497,6 +641,8 @@ class TeXFormatter:
         return content
 
     def allow_combine(self, first: str, second: str) -> bool:
+        if self.context == 'phantom':
+            return True
         if re.search(r'(?:\w{3,}|\W)\.$', first.strip(' %')):
             return False
         first = first.strip()
@@ -513,18 +659,24 @@ class TeXFormatter:
             return False
         if pattern_arrow.match(second) or pattern_arrow.match(first):
             return False
+        if r'\begin{' in first or r'\begin' in second:
+            return False
+        if r'\end{' in first or r'\end{' in second:
+            return False
         _first = first.endswith
         _second = second.startswith
-        if _second('+') or _second('-'):
+        if _first('&') or _first('\\'):
+            return False
+        if _second('+') or _second('-') or _second(r'\pm') or _second(r'\mp'):
             return False
         if _first('(') or _first('[') or _first('{'):
             return False
-        if _second(')') or _second(']') or _second('}') or _second(r'\}'):
+        if re.match(r'(\\(left|right|[bB]igg?))?(\)|\]|}|\\})', second):
             return False
-        if _first('\\left(') or _first('\\left[') or _first('\\left\\{'):
-            return False
-        if _second('\\right)') or _second('\\right]') or _second('\\right\\}'):
-            return False
+        # if _first('\\left(') or _first('\\left[') or _first('\\left\\{'):
+        #     return False
+        # if _second('\\right)') or _second('\\right]') or _second('\\right\\}'):
+        #     return False
         # if _first.strip()[-1] == '%' and _first.strip()[-2] != '\\':
         #     return True
         return True
@@ -563,16 +715,41 @@ class TeXFormatter:
                      for s in lines]
         return self.format_tex(new_lines)
 
+    def split_phantom(self, line: str) -> list[str]:
+        pattern = re.compile(r' ')
+        lines = []
+        prev_idx = 0
+        for match in pattern.finditer(line):
+            lines.append(line[prev_idx:match.start()])
+            prev_idx = match.end()
+        lines[0] = r'\phantom{' + lines[0]
+        lines.append(line[prev_idx:] + '}')
+        lines = [line for line in lines if line.strip(' %')]
+        new_lines = [self.indent + s.lstrip(' %').rstrip() + '\n'
+                     for s in lines]
+        self._context.append('phantom')
+        ret = self.format_tex(new_lines)
+        self._context.pop()
+        return ret
+
     def get_index_line(self, idx: int, line: str) -> int:
         idx_l = len(self.indent) + idx
         parenthesis = self._find_parenthesis(line, self.multline_parenthesis)
-        for (start, end), _ in parenthesis:
+        for (start, end), char in parenthesis:
             if start is None:
                 assert end is not None
                 idx_l = end + idx
                 continue
             if start >= idx_l:
                 break
+            if char == 'BEGIN':
+                if idx_l == start + 1:
+                    (start, end), _ = list(parenthesis[(start, end), char])[0]
+                    assert start is not None
+                    assert end is not None
+                    idx_l += end - start - 1
+                    break
+                idx_l -= 1
             assert end is not None, line
             idx_l += end - start - 1
         return idx_l
@@ -583,6 +760,23 @@ class TeXFormatter:
         if self.commentafter < len(line):
             new_lines = [line[:self.commentafter+1], line[self.commentafter:]]
             return self.format_tex(new_lines)
+        if (idx := skeleton.find(r'\begin{}\end{}')) >= 0:
+            if skeleton == r'\begin{}\end{}':
+                sidx = self.get_index_line(7, line) + 1
+                eidx = self.get_index_line(8, line)
+                new_lines = [line[:sidx],
+                             self.indent + 4*' ' + line[sidx:eidx].strip(),
+                             self.indent + line[eidx:].strip()]
+                new_lines = [line.rstrip() + '\n'
+                             for line in new_lines if line]
+            else:
+                sidx = self.get_index_line(idx, line)
+                eidx = self.get_index_line(idx + 13, line)
+                new_lines = [line[:sidx], line[sidx:eidx+1], line[eidx+1:]]
+                new_lines = [self.indent + line.strip() + '\n'
+                             for line in new_lines if line]
+            return self.format_tex(new_lines)
+
         # Split newlines into a new line
         pattern = re.compile(r'(\\\\|\\newline)(?=.)')
         if pattern.search(skeleton):
@@ -606,16 +800,30 @@ class TeXFormatter:
         if pattern.match(skeleton):
             start = self.get_index_line(0, line)
             end = self.get_index_line(1, line)
-            new_lines.append(line[:start+1].rstrip() + '\n')
+            # Add line before first '$'
+            new_lines.append(line[:start].rstrip() + '\n')
+            # Format the formula inside '$$'
             self._context.append('equation')
             indent = self.indent
             new_lines.extend(self.format_tex(
                 [indent + 4 * ' ' + line[start+1:end].lstrip()]
             ))
             self._context.pop()
+            # Add text after last '$'
+            new_lines.append(indent + line[end+1:].strip() + '\n')
+            # Add '$$':
+            if len(new_lines) == 3 and len(new_lines[1]) < LINE_LENGTH:
+                # The equation fits in a single line
+                new_lines[1] = f"{indent}${new_lines[1].strip()}$\n"
+            else:
+                if new_lines[0] == '\n':
+                    new_lines[0] = f"{indent}$\n"
+                else:
+                    new_lines[0] = new_lines[0].rstrip() + '$\n'
+                new_lines[-1] = f"{indent}${new_lines[-1].lstrip()}"
             # TODO?: Add % after last $.
-            new_lines.append(indent + line[end:].strip() + '\n')
-            return [line for line in new_lines if line]
+            new_lines = [line for line in new_lines if line.strip()]
+            return self.format_tex(new_lines)
         pattern = re.compile(r'\s\$\$[\s\.\,]\s?')
         if pattern.search(skeleton):
             return self.line_split(line, pattern, keep=True)
@@ -623,9 +831,9 @@ class TeXFormatter:
         for (_start, _end), char in parenthesis:
             start = _start+1 if _start is not None else 0
             end = _end if _end is not None else len(line)
-            if end - start > 40 and char == '{':
+            if end - start > int(0.51*LINE_LENGTH) and char == '{':
                 pass
-            elif end - start > 75 and char in '([':
+            elif end - start > int(0.95*LINE_LENGTH) and char in '([':
                 pass
             else:
                 continue
@@ -650,9 +858,12 @@ class TeXFormatter:
 
     def _format_equation(self, line: str) -> list[str]:
         skeleton, _ = self.get_skeleton(line, self.multline_parenthesis)
-        # Split label into own line
-        if r'\label' in line:
-            return self.line_split(line, r'\\label', keep='second')
+        # Split label and phantom into own line
+        if (r'\label' in skeleton and skeleton != r'\label{}'
+                or r'\phantom' in skeleton and skeleton != r'\phantom{}'):
+            return self.line_split(line, r'\\(label|phantom){.*?}', keep=True)
+        if skeleton == r'\phantom{}':
+            return self.split_phantom(line.strip()[9:-1])
         # If equation separator (quad), split line.
         if pattern_separate.search(skeleton):
             return self.line_split(line, pattern_separate, keep=True)
@@ -662,13 +873,17 @@ class TeXFormatter:
         # Split line in equality
         if pattern_equal.search(skeleton[1:]):
             return self.line_split(line, pattern_equal, keep='second')
+        if r'\\' in skeleton[:-2]:
+            return self.line_split(line, r'\\\\\s*\&?', keep='first')
         # If unmatched parenthesis, split right after/before.
         ret = self.check_unmatched_parenthesis(line)
         if ret is not None:
             return ret
         # Split commas
-        if ';' in skeleton:
-            return self.line_split(line, ';', keep='first')
+        if re.search(r'[^\\];', skeleton[:-1]):
+            return self.line_split(line, r'[^\\];', keep='first')
+        if re.search(r'[^\\],', skeleton[:-1]):
+            return self.line_split(line, r'[^\\],', keep='first')
         # Split sums and subtractions into multiple lines
         ret = self.split_sums(line)
         if ret is not None:
@@ -688,12 +903,12 @@ class TeXFormatter:
             return ret
         raise NotImplementedError(f'line "{line}" not splitted.')
 
-    def split_sums(self, line: str) -> Optional[list[str]]:
+    def split_sums(self, line: str) -> list[str] | None:
         skeleton, _ = self.get_skeleton(line, self.multline_parenthesis)
         new_lines = []
         prev_idx = 0
         # TODO: Handle cases like \cong - 3, etc.
-        for match in re.finditer(r'[^=\s\^_]\s*(\+|\-)', skeleton):
+        for match in re.finditer(r'[^=\s\^_]\s*(\+|\-|\\pm|\\mp)', skeleton):
             idx_s = match.start(1)
             idx_l = self.get_index_line(idx_s, line)
             new_lines.append(self.indent + line[prev_idx:idx_l].lstrip(' %'))
@@ -701,11 +916,12 @@ class TeXFormatter:
         if new_lines:
             new_lines.append(self.indent + line[idx_l:].lstrip())
             return self.format_tex(new_lines)
+        return None
 
-    def check_unmatched_parenthesis(self, line: str) -> Optional[list[str]]:
+    def check_unmatched_parenthesis(self, line: str) -> list[str] | None:
         parenthesis = self._find_parenthesis(line, self.multline_parenthesis)
-        for (start, end), _ in parenthesis:
-            if start is None and end > len(self.indent):
+        for (start, end), char in parenthesis:
+            if start is None and end > len(self.indent):  # type: ignore[operator]
                 if (match := re.search(r'\\((right|[bB]igg?)\s?\\?)?$',
                                        line[:end])):
                     end = match.start()
@@ -715,7 +931,9 @@ class TeXFormatter:
                     self.indent + 4*' ' + line[:end].strip('% ') + '\n',
                     self.indent + line[end:].rstrip() + '\n'
                 ]
-            elif end is None and start + 2 < len(line.rstrip()):
+            elif (end is None and char != 'BEGIN'
+                  and start + 2 < len(line.rstrip(' \n&'))):  # type: ignore[operator]
+                assert start is not None
                 new_lines = [
                     line[:start+1].rstrip() + '\n',
                     self.indent + 4*' ' + line[start+1:].strip() + '\n'
@@ -723,10 +941,12 @@ class TeXFormatter:
             else:
                 continue
             return self.format_tex(new_lines)
+        return None
 
-    def split_long_parenthesis(self, line: str) -> Optional[list[str]]:
+    def split_long_parenthesis(self, line: str) -> list[str] | None:
+        # ToDo: What should I do with broken left and right parenthesis?
         parenthesis = self._find_parenthesis(line, self.multline_parenthesis)
-        maxlength = 30
+        maxlength = int(0.38 * LINE_LENGTH)
         split_start, split_end = None, None
 
         # Find the longest parenthesis that exceeds the threshold
@@ -737,7 +957,7 @@ class TeXFormatter:
             maxlength = end - start
         # If no long parenthesis exists, return None
         if split_start is None:
-            return
+            return None
         # Check if there is a label or text context and handle it as text.
         if pattern_context.search(line[:split_start]):
             indent = self.indent
@@ -754,6 +974,8 @@ class TeXFormatter:
         if (match := re.search(r'\\(right|[bB]igg?)\s?\\?$',
                                line[:split_end])):
             split_end = match.start()
+        if (match := re.match(r'\(\s*\&', line[split_start:])):
+            split_start += match.end() - 1
 
         new_lines = [
             line[:split_start + 1] + '\n',
@@ -763,28 +985,30 @@ class TeXFormatter:
         ]
         return self.format_tex(new_lines)
 
-    def split_after_parenthesis(self, line: str) -> Optional[list[str]]:
+    def split_after_parenthesis(self, line: str) -> list[str] | None:
         parenthesis = self._find_parenthesis(line, self.multline_parenthesis)
         for (start, end), char in reversed(parenthesis):
-            if end > 80:
+            # Why can we be sure end is not None here?
+            assert end is not None
+            if end > LINE_LENGTH:
                 continue
             elif char == '{' and end + 1 < len(line) and line[end+1] == '{':
                 continue
             new_lines = [line[:end + 1] + '\n',
                          self.indent + line[end+1:].strip() + '\n']
             return self.format_tex(new_lines)
+        return None
 
     def update_multiline_parenthesis(self, line: str) -> None:
-        if 'phantom' in line:
-            return
         open_p = '([{'
         close_p = ')]}'
         parenthesis = self._find_parenthesis(line,
                                              self.multline_parenthesis).copy()
-        new_parenthesis = []
+        new_parenthesis: list[tuple[int, str]] = []
         while parenthesis:
             ((start, end), char), child = parenthesis.popitem()
             if start is None:
+                assert end is not None
                 new_parenthesis.append((end, Parenthesis.get_match(char)))
             elif end is None:
                 new_parenthesis.append((start, char))
@@ -792,13 +1016,18 @@ class TeXFormatter:
                 continue
             parenthesis |= child
         sent = True
-        for _, char in sorted(new_parenthesis):
+        for start, char in sorted(new_parenthesis):
             if char in close_p:
                 assert sent, line
                 assert self.multline_parenthesis, line
                 _char = self.multline_parenthesis[-1]
                 assert open_p.index(_char) == close_p.index(char), line
                 self.multline_parenthesis = self.multline_parenthesis[:-1]
+                if (self.multline_parenthesis
+                        and self.multline_parenthesis[-1] == 'p'):
+                    assert self.context == 'phantom'
+                    self._context.pop()
+                    self.multline_parenthesis = self.multline_parenthesis[:-1]
                 continue
             elif char == '$':
                 if '$' not in self.multline_parenthesis:
@@ -811,6 +1040,9 @@ class TeXFormatter:
                 continue
             sent = False
             if char in open_p:
+                if line[start-8:start] == r'\phantom':
+                    self.multline_parenthesis += 'p'
+                    self._context.append('phantom')
                 self.multline_parenthesis += char
 
     @classmethod
@@ -818,15 +1050,27 @@ class TeXFormatter:
     def get_skeleton(cls, line: str, unmatched_parenthesis: str = ''
                      ) -> tuple[str, ParenthesisType]:
         parenthesis = cls._find_parenthesis(line, unmatched_parenthesis)
+
         skeleton = line.lstrip(' %')
         offset = len(line) - len(skeleton)
-        for (start, end), _ in parenthesis:
+
+        for (start, end), char in parenthesis:
             if end is None:
+                assert start is not None
                 skeleton = skeleton[:start-offset+1]
                 break
+
             elif start is None:
                 skeleton = skeleton[end-offset:]
                 offset = end
+
+            elif char == 'BEGIN':
+                (sidx, eid), _ = list(parenthesis[(start, end), char])[0]
+                skeleton = (
+                    skeleton[:start-offset+1] + '}' + skeleton[end-offset:]
+                )
+                offset += end - start - 2
+
             else:
                 skeleton = skeleton[:start-offset+1] + skeleton[end-offset:]
                 offset += end - start - 1
@@ -848,6 +1092,7 @@ class TeXFormatter:
             return repr(self) == other
         return NotImplemented
 
+
 def format_files(*names: str | pathlib.PosixPath) -> None:
     pathdir = pathlib.Path.cwd()
     for name in names:
@@ -856,6 +1101,7 @@ def format_files(*names: str | pathlib.PosixPath) -> None:
         dest = pathdir / pathlib.Path(name)
         with filename.open() as file:
             content = file.readlines()
+        # import pdb; pdb.set_trace()
         try:
             new_content = TeXFormatter(content).formatted_lines
         except Exception as e:
@@ -869,13 +1115,13 @@ def format_files(*names: str | pathlib.PosixPath) -> None:
 def format_string() -> None:
     s = r'''
 '''
-    r = TeXFormatter(s)
+    r = TeXFormatter(s, reset=False)
     print(r)
 
 
 if __name__ == '__main__':
     try:
-        __IPYTHON__
+        __IPYTHON__  # type: ignore
         format_string()
     except NameError:
         _, *names = sys.argv
